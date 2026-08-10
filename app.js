@@ -1,14 +1,15 @@
 'use strict';
 
-const APP_VERSION = '1.1.1';
-const RELEASE_NAME = 'Life Dashboard V1.1.1';
+const APP_VERSION = '1.2.0';
+const RELEASE_NAME = 'Life Dashboard V1.2.0';
 
 const state = {
   view: 'home',
   taskFilter: 'today',
   selectedListId: null,
   selectedPlanId: null,
-  planTab: 'overview'
+  planTab: 'overview',
+  highlightItineraryItemId: null
 };
 
 const app = document.getElementById('app');
@@ -64,16 +65,67 @@ function planPhase(plan, openTaskCount){
   if(plan.startDate && plan.startDate > today && openTaskCount===0) return {key:'ready',label:'Ready'};
   return {key:'planning',label:'Planning'};
 }
-function sortedItinerary(plan){return [...(plan.itinerary||[])].sort((a,b)=>`${a.date||'9999'}T${a.time||'99:99'}`.localeCompare(`${b.date||'9999'}T${b.time||'99:99'}`));}
+function scheduleSortKey(item){
+  const date=item.displayDate||item.date||'9999-99-99';
+  let time=item.displayTime ?? item.time ?? '';
+  if(item.virtualMode==='stay') time='00:00';
+  return `${date}T${time||'99:59'}`;
+}
+function sortedItinerary(plan){return [...(plan.itinerary||[])].sort((a,b)=>scheduleSortKey(a).localeCompare(scheduleSortKey(b)));}
+function eachDateInclusive(start,end){
+  if(!start||!end||end<start)return [];
+  const dates=[]; const cursor=new Date(`${start}T12:00:00`); const finish=new Date(`${end}T12:00:00`);
+  while(cursor<=finish){dates.push(cursor.toISOString().slice(0,10));cursor.setDate(cursor.getDate()+1);}
+  return dates;
+}
+function expandedItinerary(plan){
+  const entries=[];
+  for(const source of sortedItinerary(plan)){
+    const type=inferItineraryType(source);
+    if(type==='hotel' && source.date && source.endDate && source.endDate>=source.date){
+      const dates=eachDateInclusive(source.date,source.endDate);
+      if(dates.length===1){entries.push({...source,sourceId:source.id,displayDate:source.date,displayTime:source.time||'',displayTitle:source.title,virtualMode:'hotel'});continue;}
+      dates.forEach((date,index)=>{
+        const first=index===0,last=index===dates.length-1;
+        entries.push({...source,sourceId:source.id,displayDate:date,displayTime:first?(source.time||''):last?(source.endTime||''):'',displayTitle:first?`Check in · ${source.title}`:last?`Check out · ${source.title}`:`Staying at ${source.title}`,virtualMode:first?'checkin':last?'checkout':'stay'});
+      });
+    } else {
+      entries.push({...source,sourceId:source.id,displayDate:source.date||'',displayTime:source.time||'',displayTitle:source.title,virtualMode:''});
+    }
+  }
+  return entries.sort((a,b)=>scheduleSortKey(a).localeCompare(scheduleSortKey(b)));
+}
 function nextItineraryItem(plan){
-  const items=sortedItinerary(plan); if(!items.length) return null;
+  const items=expandedItinerary(plan).filter(x=>x.virtualMode!=='stay'); if(!items.length) return null;
   const now=new Date();
   const upcoming=items.find(x=>{
-    if(!x.date) return false;
-    const dt=new Date(`${x.date}T${x.time||'23:59'}:00`);
+    if(!x.displayDate) return false;
+    const dt=new Date(`${x.displayDate}T${x.displayTime||'23:59'}:00`);
     return dt >= now;
   });
   return upcoming || items[items.length-1];
+}
+function fileDisplayName(file){return file?.displayName?.trim() || file?.name || 'Untitled file';}
+function originalFileName(file){return file?.originalName || file?.name || 'file';}
+function fileExtension(name){const m=String(name||'').match(/(\.[^./\\]+)$/);return m?m[1]:'';}
+function downloadFileName(file){const display=fileDisplayName(file);const ext=fileExtension(originalFileName(file));return ext && !display.toLowerCase().endsWith(ext.toLowerCase()) ? `${display}${ext}` : display;}
+function relativeBackupText(value){
+  if(!value)return 'No backup created yet';
+  const days=Math.max(0,Math.floor((Date.now()-new Date(value).getTime())/86400000));
+  if(days===0)return 'Backed up today';
+  if(days===1)return 'Last backup yesterday';
+  return `Last backup ${days} days ago`;
+}
+function itineraryMetaParts(item){
+  const type=inferItineraryType(item); const parts=[];
+  if(item.from||item.to)parts.push([item.from,item.to].filter(Boolean).join(' → '));
+  if(type==='flight' && item.flightNumber)parts.push(`Flight ${item.flightNumber}`);
+  if((type==='train'||type==='ferry') && item.serviceNumber)parts.push(item.serviceNumber);
+  if(item.arrivalTime)parts.push(`Arrive ${item.arrivalDate&&item.arrivalDate!==item.date?`${formatShortDate(item.arrivalDate)} · `:''}${item.arrivalTime}`);
+  if(item.venue)parts.push(item.venue);
+  if(item.address)parts.push(item.address);
+  if(item.bookingRef)parts.push(`Ref ${item.bookingRef}`);
+  return parts;
 }
 function tripCountdownText(plan){
   const d=daysUntil(plan.startDate);
@@ -116,7 +168,31 @@ function setView(view) {
 
 function setTitle(text) { pageTitle.textContent = text; }
 
+function updateFab(){
+  const fab=document.getElementById('quickAddButton');
+  if(!fab)return;
+  fab.hidden=false; fab.textContent='＋';
+  const set=(label,handler)=>{fab.setAttribute('aria-label',label);fab.title=label;fab.onclick=handler;};
+  if(state.selectedPlanId){
+    const planId=state.selectedPlanId;
+    if(state.planTab==='itinerary')return set('Add schedule item',async()=>{const plan=await LifeDB.get('plans',planId);if(plan)openItineraryForm(plan);});
+    if(state.planTab==='tasks')return set('Add task to this plan',()=>openTaskForm(null,planId));
+    if(state.planTab==='files')return set('Add file to this plan',()=>openAttachmentPicker(planId));
+    if(state.planTab==='checklist')return set('Add checklist item',()=>openPlanChecklistItem(planId));
+    return set('Add task to this plan',()=>openTaskForm(null,planId));
+  }
+  if(state.selectedListId)return set('Add item to this list',()=>openListItem(state.selectedListId));
+  if(state.view==='home')return set('Quick add',openQuickAdd);
+  if(state.view==='tasks')return set('Add task',()=>openTaskForm());
+  if(state.view==='lists')return set('Create list',()=>openListForm());
+  if(state.view==='plans')return set('Create plan',()=>openPlanForm());
+  if(state.view==='vault')return set('Add file',()=>openAttachmentPicker());
+  if(state.view==='inbox')return set('Add Inbox note',openInboxCapture);
+  fab.hidden=true;
+}
+
 async function render() {
+  updateFab();
   try {
     if (state.selectedListId) return renderListDetail(state.selectedListId);
     if (state.selectedPlanId) return renderPlanDetail(state.selectedPlanId);
@@ -135,7 +211,7 @@ async function render() {
 
 async function renderHome() {
   setTitle('Home');
-  const [tasks, lists, plans, files, inbox] = await Promise.all(['tasks','lists','plans','files','inbox'].map(LifeDB.getAll));
+  const [tasks, lists, plans, files, inbox, backupMeta] = await Promise.all([...['tasks','lists','plans','files','inbox'].map(LifeDB.getAll), LifeDB.get('settings','backupMeta')]);
   const today = todayKey();
   const openTasks = tasks.filter(t => t.status !== 'done');
   const todayTasks = openTasks.filter(t => t.dueDate && t.dueDate <= today && t.status !== 'waiting').sort(sortTasks);
@@ -153,6 +229,7 @@ async function renderHome() {
       <p>${inbox.length ? `${inbox.length} item${inbox.length===1?'':'s'} are waiting in your Inbox.` : 'Your plans, tasks, lists and files stay on this device.'}</p>
       <div class="hero-version">● Running v${APP_VERSION}</div>
     </section>
+    <button class="backup-status ${backupMeta?.lastBackupAt && (Date.now()-new Date(backupMeta.lastBackupAt).getTime())>14*86400000?'stale':''}" id="homeBackupStatus"><span>💾</span><span>${escapeHtml(relativeBackupText(backupMeta?.lastBackupAt))}</span><span>›</span></button>
 
     <section class="section">
       <div class="grid-2">
@@ -186,6 +263,7 @@ async function renderHome() {
     </section>`;
 
   app.querySelectorAll('[data-home-go]').forEach(el => el.onclick = () => setView(el.dataset.homeGo));
+  document.getElementById('homeBackupStatus').onclick=()=>{state.view='settings';document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));render();};
   wireTaskRows();
   wirePlanCards();
   wireFileCards();
@@ -386,7 +464,7 @@ async function renderPlanDetail(id) {
   setTitle(plan.title);
   const linkedTasks=tasks.filter(t=>t.planId===id).sort(sortTasks);
   const linkedFiles=files.filter(f=>f.planId===id).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  const itinerary=sortedItinerary(plan);
+  const itinerary=expandedItinerary(plan);
   const nextItem=nextItineraryItem(plan);
   const openCount=linkedTasks.filter(t=>t.status!=='done').length;
   const phase=planPhase(plan,openCount);
@@ -411,7 +489,7 @@ async function renderPlanDetail(id) {
     c.innerHTML=`
       ${isTrip && nextItem?`<section class="section"><div class="section-head"><h2>Next up</h2><button id="openNextSchedule">Schedule</button></div>${nextUpHtml(nextItem,linkedFiles)}</section>`:''}
       ${isTrip?`<section class="trip-quick-grid">
-        <button data-trip-jump="itinerary"><span>🗓️</span><strong>Schedule</strong><small>${itinerary.length} item${itinerary.length===1?'':'s'}</small></button>
+        <button data-trip-jump="itinerary"><span>🗓️</span><strong>Schedule</strong><small>${(plan.itinerary||[]).length} item${(plan.itinerary||[]).length===1?'':'s'}</small></button>
         <button data-trip-jump="files"><span>🎟️</span><strong>Tickets & files</strong><small>${linkedFiles.length} stored</small></button>
         <button data-trip-jump="checklist"><span>🧳</span><strong>Packing</strong><small>${(plan.checklist||[]).filter(i=>!i.checked).length} left</small></button>
         <button data-trip-jump="tasks"><span>✓</span><strong>Tasks</strong><small>${openCount} remaining</small></button>
@@ -420,7 +498,8 @@ async function renderPlanDetail(id) {
       <section class="section"><div class="section-head"><h2>Next tasks</h2><button id="overviewAddTask">Add</button></div><div class="card">${linkedTasks.filter(t=>t.status!=='done').slice(0,4).map(t=>taskRowHtml(t,[plan])).join('')||'<div class="empty"><strong>No open tasks</strong></div>'}</div></section>`;
     document.getElementById('overviewAddTask').onclick=()=>openTaskForm(null,id); wireTaskRows();
     c.querySelectorAll('[data-trip-jump]').forEach(btn=>btn.onclick=()=>{state.planTab=btn.dataset.tripJump;render();});
-    const nextBtn=document.getElementById('openNextSchedule'); if(nextBtn) nextBtn.onclick=()=>{state.planTab='itinerary';render();};
+    const nextBtn=document.getElementById('openNextSchedule'); if(nextBtn) nextBtn.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=nextItem?.sourceId||nextItem?.id||null;render();};
+    const nextCard=c.querySelector('[data-next-schedule]'); if(nextCard) nextCard.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=nextCard.dataset.nextSchedule;render();};
   }
   if(state.planTab==='tasks'){
     c.innerHTML=`<div class="section-head"><h2>${openCount} remaining</h2><button id="planAddTask">Add task</button></div><div class="card">${linkedTasks.length?linkedTasks.map(t=>taskRowHtml(t,[plan])).join(''):'<div class="empty"><strong>No linked tasks</strong><div>Tasks added here also appear in the main Tasks screen.</div></div>'}</div>`;
@@ -439,6 +518,10 @@ async function renderPlanDetail(id) {
     });
     c.querySelectorAll('[data-it-add-file]').forEach(btn=>btn.onclick=()=>openAttachmentPicker(id,btn.dataset.itAddFile));
     wireFileCards();
+    if(state.highlightItineraryItemId){
+      const targetId=state.highlightItineraryItemId; state.highlightItineraryItemId=null;
+      requestAnimationFrame(()=>{const target=c.querySelector(`[data-it-item="${targetId}"]`);if(target){target.classList.add('schedule-highlight');target.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>target.classList.remove('schedule-highlight'),1800);}});
+    }
   }
   if(state.planTab==='checklist'){
     const items=plan.checklist||[];
@@ -455,15 +538,17 @@ async function renderPlanDetail(id) {
 }
 
 function nextUpHtml(item,files=[]){
-  const attached=files.filter(f=>f.itineraryItemId===item.id);
+  const sourceId=item.sourceId||item.id;
+  const attached=files.filter(f=>f.itineraryItemId===sourceId);
   const type=inferItineraryType(item);
-  return `<div class="next-up-card"><div class="next-up-icon">${itineraryEmoji(type)}</div><div class="next-up-body"><div class="next-up-kicker">${[item.date?formatDate(item.date):'',item.time].filter(Boolean).join(' · ')}</div><div class="next-up-title">${escapeHtml(item.title)}</div>${item.details?`<div class="next-up-details">${escapeHtml(item.details)}</div>`:''}${attached.length?`<div class="next-up-file">📎 ${attached.length} file${attached.length===1?'':'s'} attached</div>`:''}</div></div>`;
+  const summary=itineraryMetaParts(item).slice(0,2).join(' · ');
+  return `<button type="button" class="next-up-card" data-next-schedule="${sourceId}"><div class="next-up-icon">${itineraryEmoji(type)}</div><div class="next-up-body"><div class="next-up-kicker">${[item.displayDate?formatDate(item.displayDate):'',item.displayTime||'Anytime'].filter(Boolean).join(' · ')}</div><div class="next-up-title">${escapeHtml(item.displayTitle||item.title)}</div>${summary?`<div class="next-up-details">${escapeHtml(summary)}</div>`:item.details?`<div class="next-up-details">${escapeHtml(item.details)}</div>`:''}${attached.length?`<div class="next-up-file">📎 ${attached.length} file${attached.length===1?'':'s'} attached</div>`:''}</div><div class="next-up-chevron">›</div></button>`;
 }
 
 function timelineHtml(plan,itinerary,files){
   const groups=[];
   for(const item of itinerary){
-    const key=item.date||'No date'; let group=groups.find(g=>g.key===key);
+    const key=item.displayDate||item.date||'No date'; let group=groups.find(g=>g.key===key);
     if(!group){group={key,items:[]};groups.push(group);} group.items.push(item);
   }
   return groups.map(group=>{
@@ -478,35 +563,59 @@ function timelineHtml(plan,itinerary,files){
 }
 
 function itineraryItemHtml(item,files){
-  const attached=files.filter(f=>f.itineraryItemId===item.id);
+  const sourceId=item.sourceId||item.id;
+  const attached=files.filter(f=>f.itineraryItemId===sourceId);
   const type=inferItineraryType(item);
-  return `<article class="timeline-item">
+  const meta=itineraryMetaParts(item);
+  return `<article class="timeline-item" data-it-item="${sourceId}">
     <div class="timeline-marker"><span>${itineraryEmoji(type)}</span></div>
     <div class="timeline-content">
-      <div class="timeline-time">${escapeHtml(item.time||'Any time')}</div>
-      <div class="card-title">${escapeHtml(item.title)}</div>
+      <div class="timeline-time">${escapeHtml(item.displayTime||item.time||(item.virtualMode==='stay'?'All day':'Anytime'))}</div>
+      <div class="card-title">${escapeHtml(item.displayTitle||item.title)}</div>
+      ${meta.length?`<div class="schedule-meta">${meta.map(x=>`<span>${escapeHtml(x)}</span>`).join('')}</div>`:''}
       ${item.details?`<div class="card-subtitle">${escapeHtml(item.details)}</div>`:''}
-      ${attached.length?`<div class="schedule-files">${attached.map(f=>`<button class="schedule-file-chip" data-file-open="${f.id}">📎 ${escapeHtml(f.name)}</button>`).join('')}</div>`:''}
-      <div class="schedule-actions"><button class="secondary-btn small-btn" data-it-edit="${item.id}">Edit</button><button class="secondary-btn small-btn" data-it-add-file="${item.id}">📎 Add file</button><button class="text-btn small-btn" data-it-delete="${item.id}">Remove</button></div>
+      ${attached.length?`<div class="schedule-files">${attached.map(f=>`<span class="schedule-file-wrap"><button class="schedule-file-chip" data-file-open="${f.id}">📎 ${escapeHtml(fileDisplayName(f))}</button><button class="schedule-file-rename" data-file-rename="${f.id}" aria-label="Rename ${escapeHtml(fileDisplayName(f))}">✎</button></span>`).join('')}</div>`:''}
+      <div class="schedule-actions"><button class="secondary-btn small-btn" data-it-edit="${sourceId}">Edit</button><button class="secondary-btn small-btn" data-it-add-file="${sourceId}">📎 Add file</button><button class="text-btn small-btn" data-it-delete="${sourceId}">Remove</button></div>
     </div>
   </article>`;
 }
 
+function scheduleFieldsHtml(type,item,plan){
+  const min=plan.startDate?`min="${escapeHtml(plan.startDate)}"`:'';
+  const date=item.date||plan.startDate||'';
+  const endDate=item.endDate||'';
+  const arrivalDate=item.arrivalDate||'';
+  const commonDateTime=(dateLabel='Date',timeLabel='Time')=>`<div class="grid-2"><label>${dateLabel}<input name="date" type="date" ${min} value="${escapeHtml(date)}"></label><label>${timeLabel}<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div>`;
+  const journeyFields=(kind)=>`${commonDateTime('Travel date','Departure')}<div class="grid-2"><label>From<input name="from" maxlength="100" value="${escapeHtml(item.from||'')}" placeholder="${kind==='flight'?'Airport / city':'Station / place'}"></label><label>To<input name="to" maxlength="100" value="${escapeHtml(item.to||'')}" placeholder="${kind==='flight'?'Airport / city':'Station / place'}"></label></div><div class="grid-2"><label>Arrival date <small>(optional)</small><input name="arrivalDate" type="date" value="${escapeHtml(arrivalDate)}"></label><label>Arrival time<input name="arrivalTime" type="time" value="${escapeHtml(item.arrivalTime||'')}"></label></div>${kind==='flight'?`<label>Flight number<input name="flightNumber" maxlength="30" value="${escapeHtml(item.flightNumber||'')}" placeholder="e.g. BA123"></label>`:(kind==='train'||kind==='ferry')?`<label>Service / train number <small>(optional)</small><input name="serviceNumber" maxlength="40" value="${escapeHtml(item.serviceNumber||'')}"></label>`:''}<label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
+  if(type==='hotel')return `<div class="grid-2"><label>Check-in date<input name="date" type="date" ${min} value="${escapeHtml(date)}"></label><label>Check-in time<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div><div class="grid-2"><label>Check-out date<input name="endDate" type="date" ${date?`min="${escapeHtml(date)}"`:min} value="${escapeHtml(endDate)}"></label><label>Check-out time<input name="endTime" type="time" value="${escapeHtml(item.endTime||'')}"></label></div><label>Address<input name="address" maxlength="180" value="${escapeHtml(item.address||'')}" placeholder="Hotel address"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label><div class="field-hint">One hotel booking will appear on each relevant itinerary day: check-in, staying there, then check-out.</div>`;
+  if(type==='flight'||type==='train'||type==='ferry')return journeyFields(type);
+  if(type==='drive')return `${commonDateTime('Date','Departure / pickup')}<div class="grid-2"><label>From<input name="from" maxlength="100" value="${escapeHtml(item.from||'')}"></label><label>To<input name="to" maxlength="100" value="${escapeHtml(item.to||'')}"></label></div><label>Arrival time <small>(optional)</small><input name="arrivalTime" type="time" value="${escapeHtml(item.arrivalTime||'')}"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
+  if(type==='food'||type==='activity')return `${commonDateTime('Date','Start time')}<label>${type==='food'?'Restaurant / venue':'Venue / location'}<input name="venue" maxlength="150" value="${escapeHtml(item.venue||'')}"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
+  return `${commonDateTime('Date','Time')}<label>Location <small>(optional)</small><input name="venue" maxlength="150" value="${escapeHtml(item.venue||'')}"></label>`;
+}
+
 function openItineraryForm(plan,itemId=null){
   const existing=itemId?(plan.itinerary||[]).find(x=>x.id===itemId):null;
-  const item=existing||{id:'',date:plan.startDate||'',time:'',title:'',details:'',type:'other'};
-  const selectedType=inferItineraryType(item);
+  let draft={...(existing||{id:'',date:plan.startDate||'',time:'',title:'',details:'',type:'other'})};
+  let selectedType=inferItineraryType(draft);
   showModal(itemId?'Edit schedule item':'Add schedule item',`<form id="itForm" class="form-grid">
-    <div class="grid-2"><label>Date<input name="date" type="date" value="${escapeHtml(item.date||'')}"></label><label>Time<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div>
-    <label>Type<select name="type">${itineraryTypeOptions.map(([value,label])=>`<option value="${value}" ${selectedType===value?'selected':''}>${itineraryEmoji(value)} ${label}</option>`).join('')}</select></label>
-    <label>Title<input name="title" required maxlength="100" value="${escapeHtml(item.title||'')}" placeholder="Train to Newcastle"></label>
-    <label>Details<textarea name="details" placeholder="Terminal, booking reference, address…">${escapeHtml(item.details||'')}</textarea></label>
+    <label>Type<select id="itType" name="type">${itineraryTypeOptions.map(([value,label])=>`<option value="${value}" ${selectedType===value?'selected':''}>${itineraryEmoji(value)} ${label}</option>`).join('')}</select></label>
+    <label><span id="itTitleLabelText">${selectedType==='hotel'?'Hotel / accommodation name':'Title'}</span><input id="itTitleInput" name="title" required maxlength="100" value="${escapeHtml(draft.title||'')}" placeholder="${selectedType==='hotel'?'Hotel name':'Train to Newcastle'}"></label>
+    <div id="scheduleDynamicFields"></div>
+    <label>Notes <small>(optional)</small><textarea name="details" placeholder="Extra details, instructions or useful notes">${escapeHtml(draft.details||'')}</textarea></label>
     <div class="form-actions"><button type="button" class="secondary-btn" id="cancelIt">Cancel</button><button class="primary-btn">${itemId?'Save changes':'Add'}</button></div>
   </form>`);
+  const form=document.getElementById('itForm'); const dynamic=document.getElementById('scheduleDynamicFields'); const typeSelect=document.getElementById('itType');
+  const collectDynamic=()=>{dynamic.querySelectorAll('[name]').forEach(el=>{draft[el.name]=el.value;});draft.title=form.elements.title.value;draft.details=form.elements.details.value;};
+  const renderDynamic=()=>{dynamic.innerHTML=scheduleFieldsHtml(typeSelect.value,draft,plan);const checkIn=dynamic.querySelector('[name="date"]');const checkOut=dynamic.querySelector('[name="endDate"]');if(checkIn&&checkOut){const sync=()=>{checkOut.min=checkIn.value||plan.startDate||'';if(checkIn.value&&checkOut.value&&checkOut.value<checkIn.value)checkOut.value=checkIn.value;};checkIn.onchange=sync;sync();}};
+  renderDynamic();
+  typeSelect.onchange=()=>{collectDynamic();selectedType=typeSelect.value;draft.type=selectedType;document.getElementById('itTitleLabelText').textContent=selectedType==='hotel'?'Hotel / accommodation name':'Title';document.getElementById('itTitleInput').placeholder=selectedType==='hotel'?'Hotel name':'Train to Newcastle';renderDynamic();};
   document.getElementById('cancelIt').onclick=closeModal;
-  document.getElementById('itForm').onsubmit=async e=>{
-    e.preventDefault();const f=new FormData(e.currentTarget);
-    const record={...item,id:item.id||uid('it'),date:f.get('date'),time:f.get('time'),type:f.get('type'),title:f.get('title').trim(),details:f.get('details').trim()};
+  form.onsubmit=async e=>{
+    e.preventDefault();const f=new FormData(e.currentTarget);const type=f.get('type');
+    const date=f.get('date')||'',endDate=f.get('endDate')||'';
+    if(type==='hotel'&&date&&endDate&&endDate<date){alert('Hotel check-out cannot be before check-in.');return;}
+    const record={...draft,id:draft.id||uid('it'),type,title:f.get('title').trim(),details:f.get('details').trim(),date,time:f.get('time')||'',endDate,endTime:f.get('endTime')||'',from:f.get('from')||'',to:f.get('to')||'',arrivalDate:f.get('arrivalDate')||'',arrivalTime:f.get('arrivalTime')||'',bookingRef:(f.get('bookingRef')||'').trim(),flightNumber:(f.get('flightNumber')||'').trim(),serviceNumber:(f.get('serviceNumber')||'').trim(),address:(f.get('address')||'').trim(),venue:(f.get('venue')||'').trim()};
     if(existing) plan.itinerary=(plan.itinerary||[]).map(x=>x.id===existing.id?record:x); else plan.itinerary=[...(plan.itinerary||[]),record];
     plan.updatedAt=nowIso();await LifeDB.put('plans',plan);closeModal();render();
   };
@@ -515,7 +624,9 @@ function openItineraryForm(plan,itemId=null){
 function fileCardHtml(file,plan=null){
   const icon=file.type?.includes('pdf')?'PDF':file.type?.startsWith('image/')?'IMG':'FILE';
   const itineraryItem=plan && file.itineraryItemId ? (plan.itinerary||[]).find(x=>x.id===file.itineraryItemId) : null;
-  return `<div class="card" data-file-card="${file.id}"><div class="file-row"><div class="file-icon">${icon}</div><div><div class="card-title">${escapeHtml(file.name)}</div><div class="card-subtitle">${formatBytes(file.size)} · stored locally</div>${itineraryItem?`<div class="meta"><span class="pill plan">${itineraryEmoji(inferItineraryType(itineraryItem))} ${escapeHtml(itineraryItem.title)}</span></div>`:''}</div></div><div class="card-actions"><button class="secondary-btn small-btn" data-file-open="${file.id}">Open</button><button class="secondary-btn small-btn" data-file-download="${file.id}">Save copy</button><button class="text-btn small-btn" data-file-delete="${file.id}">Delete</button></div></div>`;
+  const displayName=fileDisplayName(file);
+  const original=originalFileName(file);
+  return `<div class="card" data-file-card="${file.id}"><div class="file-row"><div class="file-icon">${icon}</div><div><div class="card-title">${escapeHtml(displayName)}</div><div class="card-subtitle">${formatBytes(file.size)} · stored locally${displayName!==original?` · Original: ${escapeHtml(original)}`:''}</div>${itineraryItem?`<div class="meta"><span class="pill plan">${itineraryEmoji(inferItineraryType(itineraryItem))} ${escapeHtml(itineraryItem.title)}</span></div>`:''}</div></div><div class="card-actions"><button class="secondary-btn small-btn" data-file-open="${file.id}">Open</button><button class="secondary-btn small-btn" data-file-rename="${file.id}">Rename</button><button class="secondary-btn small-btn" data-file-download="${file.id}">Save copy</button><button class="text-btn small-btn" data-file-delete="${file.id}">Delete</button></div></div>`;
 }
 
 async function renderVault(){
@@ -527,42 +638,57 @@ async function renderVault(){
   wireFileCards();
 }
 
-async function storeFiles(fileList,planId='',itineraryItemId=''){
+async function storeFiles(fileList,planId='',itineraryItemId='',displayNames=[]){
   const files=Array.from(fileList||[]);
   if(!files.length)return;
-  for(const file of files){await LifeDB.put('files',{id:uid('file'),name:file.name,type:file.type||'application/octet-stream',size:file.size,blob:file,planId,itineraryItemId,category:'',createdAt:nowIso(),updatedAt:nowIso()});}
+  for(let i=0;i<files.length;i++){
+    const file=files[i];const friendly=String(displayNames[i]||'').trim();
+    await LifeDB.put('files',{id:uid('file'),name:file.name,originalName:file.name,displayName:friendly&&friendly!==file.name?friendly:'',type:file.type||'application/octet-stream',size:file.size,blob:file,planId,itineraryItemId,category:'',createdAt:nowIso(),updatedAt:nowIso()});
+  }
   toast(`${files.length} file${files.length===1?'':'s'} stored locally`);render();
+}
+
+function openFileNamingForm(fileList,planId='',itineraryItemId=''){
+  const files=Array.from(fileList||[]);if(!files.length)return;
+  showModal(files.length===1?'Name attachment':'Name attachments',`<form id="fileNameForm" class="form-grid"><div class="field-hint">Give files a useful name now, or leave the original filename unchanged. You can rename them later too.</div>${files.map((file,i)=>`<label>Display name${files.length>1?` ${i+1}`:''}<input name="fileName${i}" maxlength="140" value="${escapeHtml(file.name)}"><small>Original: ${escapeHtml(file.name)}</small></label>`).join('')}<div class="form-actions"><button type="button" class="secondary-btn" id="cancelFileNames">Cancel</button><button class="primary-btn">Store locally</button></div></form>`);
+  document.getElementById('cancelFileNames').onclick=closeModal;
+  const form=document.getElementById('fileNameForm');
+  form.onsubmit=async e=>{e.preventDefault();const f=new FormData(form);const names=files.map((_,i)=>f.get(`fileName${i}`));closeModal();await storeFiles(files,planId,itineraryItemId,names);};
 }
 
 function openAttachmentPicker(planId='',itineraryItemId=''){
   showModal('Add attachment',`<div class="quick-grid attachment-picker-grid">
     <button class="quick-option" id="attachmentCameraButton"><span>📷</span><strong>Take photo</strong><small>Open the camera for a new photo</small></button>
-    <button class="quick-option" id="attachmentGalleryButton"><span>🖼️</span><strong>Choose from gallery</strong><small>Select photos or screenshots</small></button>
+    <button class="quick-option" id="attachmentGalleryButton"><span>🖼️</span><strong>Photos & images</strong><small>Ask Android for photos or screenshots</small></button>
     <button class="quick-option" id="attachmentFilesButton"><span>📁</span><strong>Browse files</strong><small>PDFs, email files and text documents</small></button>
   </div>
+  <div class="share-tip"><strong>Faster from Samsung Gallery</strong><span>If Life Dashboard appears in Android’s Share sheet, you can select a photo in Gallery → Share → Life Dashboard. Shared files land in the Vault and can then be renamed or linked.</span></div>
   <input id="attachmentCameraInput" type="file" hidden accept="image/*" capture="environment">
   <input id="attachmentGalleryInput" type="file" hidden accept="image/*" multiple>
-  <input id="attachmentFilesInput" type="file" hidden accept=".pdf,.txt,.eml,application/pdf,text/plain,message/rfc822" multiple>`);
+  <input id="attachmentFilesInput" type="file" hidden accept=".pdf,.txt,.eml,image/*,application/pdf,text/plain,message/rfc822" multiple>`);
 
   const bindPicker=(buttonId,inputId)=>{
     const input=document.getElementById(inputId);
-    document.getElementById(buttonId).onclick=()=>input.click();
-    input.onchange=async e=>{
-      const chosen=e.target.files;
-      if(!chosen?.length)return;
-      closeModal();
-      await storeFiles(chosen,planId,itineraryItemId);
-    };
+    document.getElementById(buttonId).onclick=()=>{if(typeof input.showPicker==='function'){try{input.showPicker();return;}catch(e){}}input.click();};
+    input.onchange=e=>{const chosen=e.target.files;if(!chosen?.length)return;openFileNamingForm(chosen,planId,itineraryItemId);};
   };
   bindPicker('attachmentCameraButton','attachmentCameraInput');
   bindPicker('attachmentGalleryButton','attachmentGalleryInput');
   bindPicker('attachmentFilesButton','attachmentFilesInput');
 }
 
-function wireFileCards(){
-  app.querySelectorAll('[data-file-open]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.fileOpen);if(!f)return;const url=URL.createObjectURL(f.blob);const w=window.open(url,'_blank');if(!w){const a=document.createElement('a');a.href=url;a.target='_blank';a.click();}setTimeout(()=>URL.revokeObjectURL(url),60000);});
-  app.querySelectorAll('[data-file-download]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.fileDownload);if(!f)return;const url=URL.createObjectURL(f.blob);const a=document.createElement('a');a.href=url;a.download=f.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);});
-  app.querySelectorAll('[data-file-delete]').forEach(btn=>btn.onclick=async()=>{if(confirm('Delete this locally stored file?')){await LifeDB.remove('files',btn.dataset.fileDelete);render();}});
+async function openRenameFile(fileId){
+  const file=await LifeDB.get('files',fileId);if(!file)return;
+  showModal('Rename file',`<form id="renameFileForm" class="form-grid"><label>Display name<input name="displayName" required maxlength="140" value="${escapeHtml(fileDisplayName(file))}"><small>Original file: ${escapeHtml(originalFileName(file))}</small></label><div class="form-actions"><button type="button" class="secondary-btn" id="cancelRenameFile">Cancel</button><button class="primary-btn">Save name</button></div></form>`);
+  document.getElementById('cancelRenameFile').onclick=closeModal;
+  document.getElementById('renameFileForm').onsubmit=async e=>{e.preventDefault();const name=new FormData(e.currentTarget).get('displayName').trim();file.originalName=file.originalName||file.name;file.displayName=name===file.originalName?'':name;file.updatedAt=nowIso();await LifeDB.put('files',file);closeModal();toast('File renamed');render();};
+}
+
+function wireFileCards(root=app){
+  root.querySelectorAll('[data-file-open]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.fileOpen);if(!f)return;const url=URL.createObjectURL(f.blob);const w=window.open(url,'_blank');if(!w){const a=document.createElement('a');a.href=url;a.target='_blank';a.click();}setTimeout(()=>URL.revokeObjectURL(url),60000);});
+  root.querySelectorAll('[data-file-rename]').forEach(btn=>btn.onclick=()=>openRenameFile(btn.dataset.fileRename));
+  root.querySelectorAll('[data-file-download]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.fileDownload);if(!f)return;const url=URL.createObjectURL(f.blob);const a=document.createElement('a');a.href=url;a.download=downloadFileName(f);a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);});
+  root.querySelectorAll('[data-file-delete]').forEach(btn=>btn.onclick=async()=>{if(confirm('Delete this locally stored file?')){await LifeDB.remove('files',btn.dataset.fileDelete);render();}});
 }
 
 async function renderInbox(){
@@ -580,16 +706,31 @@ function openInboxCapture(){
   document.getElementById('inboxForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);await LifeDB.put('inbox',{id:uid('inbox'),type:'note',text:f.get('text').trim(),createdAt:nowIso(),updatedAt:nowIso()});closeModal();toast('Added to Inbox');if(state.view==='inbox')render();};
 }
 
+async function openListItem(listId){
+  const list=await LifeDB.get('lists',listId);if(!list)return;
+  showModal('Add list item',`<form id="listFabForm" class="form-grid"><label>Item<input name="text" required maxlength="120" placeholder="Add item"></label><div class="form-actions"><button type="button" class="secondary-btn" id="cancelListFab">Cancel</button><button class="primary-btn">Add</button></div></form>`);
+  document.getElementById('cancelListFab').onclick=closeModal;
+  document.getElementById('listFabForm').onsubmit=async e=>{e.preventDefault();const text=new FormData(e.currentTarget).get('text').trim();list.items=[...(list.items||[]),{id:uid('item'),text,checked:false}];list.updatedAt=nowIso();await LifeDB.put('lists',list);closeModal();render();};
+}
+
+async function openPlanChecklistItem(planId){
+  const plan=await LifeDB.get('plans',planId);if(!plan)return;
+  showModal('Add checklist item',`<form id="planFabChecklist" class="form-grid"><label>Item<input name="text" required maxlength="120" placeholder="Add packing or checklist item"></label><div class="form-actions"><button type="button" class="secondary-btn" id="cancelPlanFabChecklist">Cancel</button><button class="primary-btn">Add</button></div></form>`);
+  document.getElementById('cancelPlanFabChecklist').onclick=closeModal;
+  document.getElementById('planFabChecklist').onsubmit=async e=>{e.preventDefault();const text=new FormData(e.currentTarget).get('text').trim();plan.checklist=[...(plan.checklist||[]),{id:uid('check'),text,checked:false}];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);closeModal();render();};
+}
+
 async function renderSettings(){
   setTitle('Settings');
   let usage='Unavailable', quota='';
   if(navigator.storage?.estimate){const est=await navigator.storage.estimate();usage=formatBytes(est.usage||0);quota=formatBytes(est.quota||0);}
   const persisted=navigator.storage?.persisted ? await navigator.storage.persisted() : false;
+  const backupMeta=await LifeDB.get('settings','backupMeta');
   app.innerHTML=`<div class="back-row"><button id="backSettings">‹ Home</button></div>
     <section class="section"><div class="card">
       <div class="settings-row"><h3>App version</h3><p>Running <strong>v${APP_VERSION}</strong> · ${RELEASE_NAME}. Use this to confirm exactly which release Samsung Internet has loaded.</p><button id="checkVersion" class="secondary-btn">Check deployed version</button> <button id="reloadLatest" class="secondary-btn">Reload latest</button></div>
       <div class="settings-row"><h3>Local storage</h3><p>Browser storage currently uses about <strong>${usage}</strong>${quota?` of ${quota} available`:''}. Persistent storage requested: <strong>${persisted?'Yes':'No'}</strong>.</p><button id="requestPersist" class="secondary-btn">Protect local storage</button></div>
-      <div class="settings-row"><h3>Encrypted backup</h3><p>Export tasks, lists, plans, Inbox items and attachments into one encrypted <code>.lifedash</code> file. Keep the password safe: it is not recoverable.</p><button id="exportBackup" class="primary-btn">Export everything</button> <button id="importBackup" class="secondary-btn">Restore backup</button><input type="file" id="backupInput" hidden accept=".lifedash,application/octet-stream"></div>
+      <div class="settings-row"><h3>Encrypted backup</h3><p><strong>${escapeHtml(relativeBackupText(backupMeta?.lastBackupAt))}</strong>. Export tasks, lists, plans, Inbox items and attachments into one encrypted <code>.lifedash</code> file. Keep the password safe: it is not recoverable.</p><button id="exportBackup" class="primary-btn">Export everything</button> <button id="importBackup" class="secondary-btn">Restore backup</button><input type="file" id="backupInput" hidden accept=".lifedash,application/octet-stream"></div>
       <div class="settings-row"><h3>Cache controls</h3><p>Clearing the app cache does <strong>not</strong> delete your IndexedDB data or attachments. It only forces the app code to be downloaded again.</p><button id="clearCache" class="secondary-btn">Clear app cache</button></div>
       <div class="settings-row"><h3>Privacy</h3><p>Your personal content is stored locally in this browser profile. Someone opening the public GitHub Pages URL on another device gets a fresh empty dashboard. Clearing site data, uninstalling browser data, or changing phones without a backup can remove local content.</p></div>
     </div></section>`;
@@ -646,7 +787,9 @@ async function exportEncryptedBackup(){
     const cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,plain));
     const wrapper={format:'life-dashboard-encrypted',version:1,kdf:'PBKDF2-SHA256',iterations:250000,cipher:'AES-256-GCM',salt:bytesToBase64(salt),iv:bytesToBase64(iv),data:bytesToBase64(cipher)};
     const blob=new Blob([JSON.stringify(wrapper)],{type:'application/octet-stream'});
-    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`LifeDashboard-${todayKey()}-v${APP_VERSION}.lifedash`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);toast('Encrypted backup created');
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`LifeDashboard-${todayKey()}-v${APP_VERSION}.lifedash`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
+    await LifeDB.put('settings',{id:'backupMeta',lastBackupAt:nowIso(),lastBackupVersion:APP_VERSION});toast('Encrypted backup created');
+    if(state.view==='settings')renderSettings();
   }catch(error){console.error(error);alert(`Backup failed: ${error.message||error}`);}
 }
 
@@ -690,7 +833,9 @@ document.getElementById('settingsButton').onclick=()=>{state.view='settings';sta
 
 async function init(){
   await LifeDB.open();
+  const params=new URLSearchParams(location.search);const shared=params.get('shared');if(shared){history.replaceState({},'',location.pathname+location.hash);}
   render();
+  if(shared)setTimeout(()=>toast(shared==='files'?'Shared file added to Vault':'Shared item added to Life Dashboard'),500);
   if('serviceWorker' in navigator){
     try{await navigator.serviceWorker.register('./sw.js');}catch(error){console.warn('Service worker registration failed',error);}
   }

@@ -223,5 +223,25 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .quick-grid { grid-template-columns: 1fr; }
 }
 
-/* V1.1.1 attachment source chooser */
+/* V1.2.0 attachment source chooser */
 .attachment-picker-grid .quick-option:last-of-type { grid-column: 1 / -1; }
+
+
+/* V1.2.0 usability additions */
+.backup-status { width:100%; margin-top:10px; display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:9px; border:1px solid var(--line); background:var(--surface); border-radius:15px; padding:10px 12px; color:var(--muted); text-align:left; font-size:.76rem; font-weight:740; }
+.backup-status.stale { background:#fff8e8; border-color:#f0d79f; color:#7b591b; }
+.next-up-card { width:100%; text-align:left; cursor:pointer; color:inherit; }
+.next-up-chevron { align-self:center; color:var(--accent); font-size:1.4rem; font-weight:700; }
+.schedule-meta { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+.schedule-meta span { display:inline-flex; max-width:100%; padding:4px 7px; border-radius:999px; background:var(--surface-2); color:var(--muted); font-size:.68rem; font-weight:720; overflow-wrap:anywhere; }
+.timeline-item.schedule-highlight .timeline-content { border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-soft),0 8px 24px rgba(28,36,56,.06); }
+.field-hint { border-radius:13px; padding:10px 11px; background:var(--surface-2); color:var(--muted); font-size:.74rem; line-height:1.4; }
+label small { font-weight:600; color:var(--muted); }
+.share-tip { display:grid; gap:4px; margin-top:12px; padding:12px 13px; border-radius:15px; background:#f3f5ff; color:var(--muted); font-size:.74rem; line-height:1.4; }
+.share-tip strong { color:var(--text); }
+.fab[hidden] { display:none; }
+
+.next-up-card { grid-template-columns:52px minmax(0,1fr) auto; }
+.schedule-file-wrap { display:inline-flex; min-width:0; max-width:100%; align-items:center; background:var(--accent-soft); border-radius:999px; overflow:hidden; }
+.schedule-file-wrap .schedule-file-chip { border-radius:999px 0 0 999px; background:transparent; }
+.schedule-file-rename { flex:0 0 auto; border:0; background:transparent; color:var(--accent); padding:6px 8px 6px 4px; font-weight:850; }
