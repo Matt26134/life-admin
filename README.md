@@ -1,4 +1,4 @@
-# Life Dashboard — V1.0.0
+# Life Dashboard — V1.1.0
 
 A mobile-first, local-first personal PWA for tasks, lists, plans/trips, an Inbox and locally stored files.
 
@@ -10,7 +10,7 @@ Files such as PDFs, screenshots and tickets are stored as blobs in IndexedDB. Th
 
 Important: browser/site data can still be deleted by the operating system, browser settings, a factory reset or a phone replacement. Use the encrypted backup feature regularly.
 
-## V1.0 features
+## V1.1 features
 
 - Home dashboard with visible running version number
 - Tasks with Today / Upcoming / Waiting / All views
@@ -29,3 +29,11 @@ Important: browser/site data can still be deleted by the operating system, brows
 ## Deployment
 
 Publish the repository root from the `main` branch using GitHub Pages. No build step is required.
+
+
+## V1.1.0 changes
+- Trip end dates can no longer be earlier than start dates.
+- Schedule items can be edited.
+- Files can be attached directly to a schedule item while remaining visible in the Plan Files area and global Vault.
+- Trips have a richer travel-companion design with countdowns, progress state, next-up card, quick-access tiles and a visual timeline.
+- Existing V1.0 IndexedDB data is preserved; no database reset is required.
