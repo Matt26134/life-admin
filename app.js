@@ -1,7 +1,7 @@
 'use strict';
 
-const APP_VERSION = '1.1.0';
-const RELEASE_NAME = 'Life Dashboard V1.1';
+const APP_VERSION = '1.1.1';
+const RELEASE_NAME = 'Life Dashboard V1.1.1';
 
 const state = {
   view: 'home',
@@ -437,8 +437,7 @@ async function renderPlanDetail(id) {
       for(const f of linkedFiles.filter(f=>f.itineraryItemId===itemId)){f.itineraryItemId='';f.updatedAt=nowIso();await LifeDB.put('files',f);}
       await LifeDB.put('plans',plan);render();
     });
-    c.querySelectorAll('[data-it-add-file]').forEach(btn=>btn.onclick=()=>document.getElementById(`itFile_${btn.dataset.itAddFile}`).click());
-    c.querySelectorAll('[data-it-file-input]').forEach(input=>input.onchange=e=>storeFiles(e.target.files,id,input.dataset.itFileInput));
+    c.querySelectorAll('[data-it-add-file]').forEach(btn=>btn.onclick=()=>openAttachmentPicker(id,btn.dataset.itAddFile));
     wireFileCards();
   }
   if(state.planTab==='checklist'){
@@ -449,9 +448,8 @@ async function renderPlanDetail(id) {
     document.getElementById('planChecklistAdd').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);plan.checklist=[...(plan.checklist||[]),{id:uid('check'),text:f.get('text').trim(),checked:false}];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);render();};
   }
   if(state.planTab==='files'){
-    c.innerHTML=`<div class="section-head"><h2>${linkedFiles.length} file${linkedFiles.length===1?'':'s'}</h2><button id="planUploadFile">Add file</button></div>${linkedFiles.length?linkedFiles.map(f=>fileCardHtml(f,plan)).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>No files attached</strong><div>Store PDFs, screenshots, tickets and confirmations locally on this device.</div></div>'}<input id="planFileInput" type="file" hidden multiple accept="image/*,.pdf,.txt,.eml">`;
-    document.getElementById('planUploadFile').onclick=()=>document.getElementById('planFileInput').click();
-    document.getElementById('planFileInput').onchange=e=>storeFiles(e.target.files,id);
+    c.innerHTML=`<div class="section-head"><h2>${linkedFiles.length} file${linkedFiles.length===1?'':'s'}</h2><button id="planUploadFile">Add file</button></div>${linkedFiles.length?linkedFiles.map(f=>fileCardHtml(f,plan)).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>No files attached</strong><div>Store PDFs, screenshots, tickets and confirmations locally on this device.</div></div>'}`;
+    document.getElementById('planUploadFile').onclick=()=>openAttachmentPicker(id);
     wireFileCards();
   }
 }
@@ -490,7 +488,6 @@ function itineraryItemHtml(item,files){
       ${item.details?`<div class="card-subtitle">${escapeHtml(item.details)}</div>`:''}
       ${attached.length?`<div class="schedule-files">${attached.map(f=>`<button class="schedule-file-chip" data-file-open="${f.id}">📎 ${escapeHtml(f.name)}</button>`).join('')}</div>`:''}
       <div class="schedule-actions"><button class="secondary-btn small-btn" data-it-edit="${item.id}">Edit</button><button class="secondary-btn small-btn" data-it-add-file="${item.id}">📎 Add file</button><button class="text-btn small-btn" data-it-delete="${item.id}">Remove</button></div>
-      <input id="itFile_${item.id}" data-it-file-input="${item.id}" type="file" hidden multiple accept="image/*,.pdf,.txt,.eml">
     </div>
   </article>`;
 }
@@ -525,9 +522,8 @@ async function renderVault(){
   setTitle('Vault');
   const [files,plans]=await Promise.all([LifeDB.getAll('files'),LifeDB.getAll('plans')]);
   files.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  app.innerHTML=`<div class="notice">Files in the Vault are stored in this browser’s IndexedDB on this device. They are not uploaded into the GitHub repository.</div><section class="section"><div class="section-head"><h2>${files.length} stored file${files.length===1?'':'s'}</h2><button id="vaultUpload">Add file</button></div>${files.length?files.map(f=>{const p=plans.find(p=>p.id===f.planId);const html=fileCardHtml(f,p);return html.replace('</div></div><div class="card-actions">',`${p?`<div class="meta"><span class="pill plan">✈ ${escapeHtml(p.title)}</span></div>`:''}</div></div><div class="card-actions">`)}).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>Vault is empty</strong><div>Add a PDF, screenshot, ticket or other useful file.</div></div>'}<input id="vaultInput" type="file" hidden multiple accept="image/*,.pdf,.txt,.eml"></section>`;
-  document.getElementById('vaultUpload').onclick=()=>document.getElementById('vaultInput').click();
-  document.getElementById('vaultInput').onchange=e=>storeFiles(e.target.files,'');
+  app.innerHTML=`<div class="notice">Files in the Vault are stored in this browser’s IndexedDB on this device. They are not uploaded into the GitHub repository.</div><section class="section"><div class="section-head"><h2>${files.length} stored file${files.length===1?'':'s'}</h2><button id="vaultUpload">Add file</button></div>${files.length?files.map(f=>{const p=plans.find(p=>p.id===f.planId);const html=fileCardHtml(f,p);return html.replace('</div></div><div class="card-actions">',`${p?`<div class="meta"><span class="pill plan">✈ ${escapeHtml(p.title)}</span></div>`:''}</div></div><div class="card-actions">`)}).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>Vault is empty</strong><div>Add a PDF, screenshot, ticket or other useful file.</div></div>'}</section>`;
+  document.getElementById('vaultUpload').onclick=()=>openAttachmentPicker();
   wireFileCards();
 }
 
@@ -536,6 +532,31 @@ async function storeFiles(fileList,planId='',itineraryItemId=''){
   if(!files.length)return;
   for(const file of files){await LifeDB.put('files',{id:uid('file'),name:file.name,type:file.type||'application/octet-stream',size:file.size,blob:file,planId,itineraryItemId,category:'',createdAt:nowIso(),updatedAt:nowIso()});}
   toast(`${files.length} file${files.length===1?'':'s'} stored locally`);render();
+}
+
+function openAttachmentPicker(planId='',itineraryItemId=''){
+  showModal('Add attachment',`<div class="quick-grid attachment-picker-grid">
+    <button class="quick-option" id="attachmentCameraButton"><span>📷</span><strong>Take photo</strong><small>Open the camera for a new photo</small></button>
+    <button class="quick-option" id="attachmentGalleryButton"><span>🖼️</span><strong>Choose from gallery</strong><small>Select photos or screenshots</small></button>
+    <button class="quick-option" id="attachmentFilesButton"><span>📁</span><strong>Browse files</strong><small>PDFs, email files and text documents</small></button>
+  </div>
+  <input id="attachmentCameraInput" type="file" hidden accept="image/*" capture="environment">
+  <input id="attachmentGalleryInput" type="file" hidden accept="image/*" multiple>
+  <input id="attachmentFilesInput" type="file" hidden accept=".pdf,.txt,.eml,application/pdf,text/plain,message/rfc822" multiple>`);
+
+  const bindPicker=(buttonId,inputId)=>{
+    const input=document.getElementById(inputId);
+    document.getElementById(buttonId).onclick=()=>input.click();
+    input.onchange=async e=>{
+      const chosen=e.target.files;
+      if(!chosen?.length)return;
+      closeModal();
+      await storeFiles(chosen,planId,itineraryItemId);
+    };
+  };
+  bindPicker('attachmentCameraButton','attachmentCameraInput');
+  bindPicker('attachmentGalleryButton','attachmentGalleryInput');
+  bindPicker('attachmentFilesButton','attachmentFilesInput');
 }
 
 function wireFileCards(){
@@ -651,16 +672,15 @@ function openQuickAdd(){
     <button class="quick-option" data-quick="list"><span>☑</span><strong>List</strong><small>Shopping, packing or checklist</small></button>
     <button class="quick-option" data-quick="plan"><span>✈️</span><strong>Plan</strong><small>Trip, event or project</small></button>
     <button class="quick-option" data-quick="file"><span>▣</span><strong>File</strong><small>PDF, ticket or screenshot</small></button>
-  </div><input id="quickFileInput" type="file" hidden multiple accept="image/*,.pdf,.txt,.eml">`);
+  </div>`);
   modalRoot.querySelectorAll('[data-quick]').forEach(btn=>btn.onclick=()=>{
     const q=btn.dataset.quick;
     if(q==='task'){closeModal();openTaskForm();}
     if(q==='inbox'){closeModal();openInboxCapture();}
     if(q==='list'){closeModal();openListForm();}
     if(q==='plan'){closeModal();openPlanForm();}
-    if(q==='file'){document.getElementById('quickFileInput').click();}
+    if(q==='file'){openAttachmentPicker();}
   });
-  document.getElementById('quickFileInput').onchange=e=>{const files=e.target.files;closeModal();storeFiles(files,'');};
 }
 
 document.querySelectorAll('.nav-item').forEach(btn=>btn.onclick=()=>setView(btn.dataset.view));

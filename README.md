@@ -1,4 +1,4 @@
-# Life Dashboard — V1.1.0
+# Life Dashboard — V1.1.1
 
 A mobile-first, local-first personal PWA for tasks, lists, plans/trips, an Inbox and locally stored files.
 
@@ -31,7 +31,14 @@ Important: browser/site data can still be deleted by the operating system, brows
 Publish the repository root from the `main` branch using GitHub Pages. No build step is required.
 
 
+## V1.1.1 changes
+
+- Added an in-app attachment chooser: Take photo, Choose from gallery, or Browse files.
+- Applied the same attachment flow to Vault, Plans, schedule items and Quick Add.
+- No database/schema changes; existing local data remains compatible.
+
 ## V1.1.0 changes
+
 - Trip end dates can no longer be earlier than start dates.
 - Schedule items can be edited.
 - Files can be attached directly to a schedule item while remaining visible in the Plan Files area and global Vault.

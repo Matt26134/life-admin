@@ -222,3 +222,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .nav-item { font-size: .6rem; }
   .quick-grid { grid-template-columns: 1fr; }
 }
+
+/* V1.1.1 attachment source chooser */
+.attachment-picker-grid .quick-option:last-of-type { grid-column: 1 / -1; }
