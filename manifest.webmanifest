@@ -1,7 +1,7 @@
 {
   "name": "Life Dashboard",
   "short_name": "Life Dashboard",
-  "description": "A local-first personal dashboard for tasks, lists, plans and important files.",
+  "description": "A local-first personal dashboard connecting tasks, lists, plans, schedules and important files.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

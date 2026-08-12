@@ -1,4 +1,4 @@
-const CACHE_NAME = 'life-dashboard-v1.2.0';
+const CACHE_NAME = 'life-dashboard-v2.0.0';
 const APP_SHELL = [
   './',
   './index.html',
@@ -14,10 +14,10 @@ const APP_SHELL = [
 function sharedUid(prefix){return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;}
 function openLifeDb(){
   return new Promise((resolve,reject)=>{
-    const request=indexedDB.open('LifeDashboardDB',1);
+    const request=indexedDB.open('LifeDashboardDB',2);
     request.onupgradeneeded=()=>{
       const db=request.result;
-      for(const store of ['tasks','lists','plans','files','inbox','settings'])if(!db.objectStoreNames.contains(store))db.createObjectStore(store,{keyPath:'id'});
+      for(const store of ['tasks','lists','plans','files','inbox','settings','templates'])if(!db.objectStoreNames.contains(store))db.createObjectStore(store,{keyPath:'id'});
     };
     request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
   });
@@ -31,7 +31,7 @@ async function handleShareTarget(request){
   const files=form.getAll('files').filter(value=>value && typeof value==='object' && 'size' in value && value.size>0);
   const now=new Date().toISOString();
   for(const file of files){
-    await putShared('files',{id:sharedUid('file'),name:file.name||'Shared image',originalName:file.name||'Shared image',displayName:'',type:file.type||'application/octet-stream',size:file.size||0,blob:file,planId:'',itineraryItemId:'',category:'',createdAt:now,updatedAt:now,source:'android-share'});
+    await putShared('files',{id:sharedUid('file'),name:file.name||'Shared image',originalName:file.name||'Shared image',displayName:'',type:file.type||'application/octet-stream',size:file.size||0,blob:file,planId:'',itineraryItemId:'',planIds:[],itineraryItemIds:[],taskIds:[],pinned:false,category:'',createdAt:now,updatedAt:now,source:'android-share'});
   }
   if(!files.length){
     const text=[form.get('title'),form.get('text'),form.get('url')].filter(Boolean).join('\n').trim();

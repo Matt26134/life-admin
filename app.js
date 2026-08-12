@@ -1,7 +1,7 @@
 'use strict';
 
-const APP_VERSION = '1.2.0';
-const RELEASE_NAME = 'Life Dashboard V1.2.0';
+const APP_VERSION = '2.0.0';
+const RELEASE_NAME = 'Life Dashboard V2.0.0';
 
 const state = {
   view: 'home',
@@ -9,7 +9,8 @@ const state = {
   selectedListId: null,
   selectedPlanId: null,
   planTab: 'overview',
-  highlightItineraryItemId: null
+  highlightItineraryItemId: null,
+  searchQuery: ''
 };
 
 const app = document.getElementById('app');
@@ -58,13 +59,14 @@ function planThemeClass(plan){
   for(let i=0;i<source.length;i++) hash=(hash*31+source.charCodeAt(i))>>>0;
   return `trip-theme-${hash%4}`;
 }
-function planPhase(plan, openTaskCount){
+function planPhase(plan, openTaskCount, plannedCount=0){
   const today=todayKey();
   if(plan.endDate && plan.endDate < today) return {key:'complete',label:'Complete'};
   if(plan.startDate && plan.startDate <= today && (!plan.endDate || plan.endDate >= today)) return {key:'travelling',label:'Travelling'};
-  if(plan.startDate && plan.startDate > today && openTaskCount===0) return {key:'ready',label:'Ready'};
+  if(plan.startDate && plan.startDate > today && openTaskCount===0 && plannedCount===0) return {key:'ready',label:'Ready'};
   return {key:'planning',label:'Planning'};
 }
+
 function scheduleSortKey(item){
   const date=item.displayDate||item.date||'9999-99-99';
   let time=item.displayTime ?? item.time ?? '';
@@ -96,15 +98,16 @@ function expandedItinerary(plan){
   return entries.sort((a,b)=>scheduleSortKey(a).localeCompare(scheduleSortKey(b)));
 }
 function nextItineraryItem(plan){
-  const items=expandedItinerary(plan).filter(x=>x.virtualMode!=='stay'); if(!items.length) return null;
+  const items=expandedItinerary(plan).filter(x=>x.virtualMode!=='stay');
+  if(!items.length) return null;
   const now=new Date();
-  const upcoming=items.find(x=>{
+  return items.find(x=>{
     if(!x.displayDate) return false;
     const dt=new Date(`${x.displayDate}T${x.displayTime||'23:59'}:00`);
     return dt >= now;
-  });
-  return upcoming || items[items.length-1];
+  }) || null;
 }
+
 function fileDisplayName(file){return file?.displayName?.trim() || file?.name || 'Untitled file';}
 function originalFileName(file){return file?.originalName || file?.name || 'file';}
 function fileExtension(name){const m=String(name||'').match(/(\.[^./\\]+)$/);return m?m[1]:'';}
@@ -136,6 +139,40 @@ function tripCountdownText(plan){
   if(plan.endDate && plan.endDate>=todayKey()) return 'Trip underway';
   return 'Trip complete';
 }
+
+function uniq(values){return [...new Set((values||[]).filter(Boolean))];}
+function filePlanIds(file){return uniq([file?.planId,...(file?.planIds||[])]);}
+function fileItineraryIds(file){return uniq([file?.itineraryItemId,...(file?.itineraryItemIds||[])]);}
+function fileTaskIds(file){return uniq(file?.taskIds||[]);}
+function fileLinkedToPlan(file,plan,linkedTasks=[]){
+  if(filePlanIds(file).includes(plan.id))return true;
+  const itineraryIds=new Set((plan.itinerary||[]).map(i=>i.id));
+  if(fileItineraryIds(file).some(id=>itineraryIds.has(id)))return true;
+  const taskIds=new Set(linkedTasks.map(t=>t.id));
+  return fileTaskIds(file).some(id=>taskIds.has(id));
+}
+function filesForSchedule(files,itemId){return files.filter(f=>fileItineraryIds(f).includes(itemId));}
+function recurrenceLabel(value){return ({daily:'Daily',weekly:'Weekly',monthly:'Monthly',yearly:'Yearly'})[value]||'';}
+function nextRecurringDate(date,recurrence){
+  if(!date||!recurrence)return date||'';
+  const d=new Date(`${date}T12:00:00`);
+  if(recurrence==='daily')d.setDate(d.getDate()+1);
+  if(recurrence==='weekly')d.setDate(d.getDate()+7);
+  if(recurrence==='monthly'){
+    const day=d.getDate();d.setDate(1);d.setMonth(d.getMonth()+1);const max=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();d.setDate(Math.min(day,max));
+  }
+  if(recurrence==='yearly'){
+    const month=d.getMonth(),day=d.getDate();d.setDate(1);d.setFullYear(d.getFullYear()+1);d.setMonth(month);const max=new Date(d.getFullYear(),month+1,0).getDate();d.setDate(Math.min(day,max));
+  }
+  return d.toISOString().slice(0,10);
+}
+function scheduleMoment(item){
+  const date=item.displayDate||item.date||''; if(!date)return null;
+  return new Date(`${date}T${item.displayTime||item.time||'23:59'}:00`);
+}
+function isTripActive(plan){const t=todayKey();return plan.type==='trip'&&!!plan.startDate&&plan.startDate<=t&&(!plan.endDate||plan.endDate>=t);}
+function isImageFile(file){return !!file?.type?.startsWith('image/');}
+function scheduleStatusLabel(item){return item.bookingStatus==='booked'?'Booked':item.bookingStatus==='planned'?'Planned':'';}
 
 function toast(message) {
   toastEl.textContent = message;
@@ -212,61 +249,55 @@ async function render() {
 async function renderHome() {
   setTitle('Home');
   const [tasks, lists, plans, files, inbox, backupMeta] = await Promise.all([...['tasks','lists','plans','files','inbox'].map(LifeDB.getAll), LifeDB.get('settings','backupMeta')]);
-  const today = todayKey();
-  const openTasks = tasks.filter(t => t.status !== 'done');
-  const todayTasks = openTasks.filter(t => t.dueDate && t.dueDate <= today && t.status !== 'waiting').sort(sortTasks);
-  const waiting = openTasks.filter(t => t.status === 'waiting');
-  const nextPlan = plans.filter(p => p.endDate ? p.endDate >= today : true).sort((a,b) => (a.startDate || '9999').localeCompare(b.startDate || '9999'))[0];
-  const shopping = lists.find(l => l.type === 'shopping') || lists[0];
-  const shoppingRemaining = shopping ? (shopping.items || []).filter(i => !i.checked).length : 0;
-  const recentFiles = files.sort((a,b) => (b.createdAt || '').localeCompare(a.createdAt || '')).slice(0,3);
-  const dateText = new Intl.DateTimeFormat('en-GB',{weekday:'long',day:'numeric',month:'long'}).format(new Date());
+  const today=todayKey();
+  const openTasks=tasks.filter(t=>t.status!=='done');
+  const todayTasks=openTasks.filter(t=>t.dueDate&&t.dueDate<=today&&t.status!=='waiting').sort(sortTasks);
+  const waiting=openTasks.filter(t=>t.status==='waiting');
+  const activeTrip=plans.find(isTripActive)||null;
+  const nextPlan=activeTrip||plans.filter(p=>p.endDate?p.endDate>=today:true).sort((a,b)=>(a.startDate||'9999').localeCompare(b.startDate||'9999'))[0];
+  const shopping=lists.find(l=>l.type==='shopping')||lists[0];
+  const shoppingRemaining=shopping?(shopping.items||[]).filter(i=>!i.checked).length:0;
+  const recentFiles=[...files].sort((a,b)=>(b.pinned===true)-(a.pinned===true)||(b.createdAt||'').localeCompare(a.createdAt||'')).slice(0,3);
+  const dateText=new Intl.DateTimeFormat('en-GB',{weekday:'long',day:'numeric',month:'long'}).format(new Date());
+  const todaySchedule=[];
+  for(const plan of plans){for(const item of expandedItinerary(plan).filter(i=>(i.displayDate||i.date)===today)){todaySchedule.push({plan,item});}}
+  todaySchedule.sort((a,b)=>scheduleSortKey(a.item).localeCompare(scheduleSortKey(b.item)));
+  const agendaCount=todayTasks.length+todaySchedule.length;
+  const heroTitle=activeTrip?`You’re travelling · ${activeTrip.title}`:agendaCount?`${agendaCount} thing${agendaCount===1?'':'s'} on today`:'You’re all caught up for today';
 
-  app.innerHTML = `
-    <section class="hero">
+  app.innerHTML=`
+    <section class="hero ${activeTrip?'hero-travel':''}">
       <div class="date">${escapeHtml(dateText)}</div>
-      <h2>${todayTasks.length ? `${todayTasks.length} thing${todayTasks.length===1?'':'s'} need attention` : 'You’re all caught up for today'}</h2>
-      <p>${inbox.length ? `${inbox.length} item${inbox.length===1?'':'s'} are waiting in your Inbox.` : 'Your plans, tasks, lists and files stay on this device.'}</p>
+      <h2>${escapeHtml(heroTitle)}</h2>
+      <p>${activeTrip?'Schedule, tickets and today’s tasks are pulled together below.':inbox.length?`${inbox.length} item${inbox.length===1?'':'s'} are waiting in your Inbox.`:'Your plans, tasks, lists and files stay on this device.'}</p>
       <div class="hero-version">● Running v${APP_VERSION}</div>
     </section>
-    <button class="backup-status ${backupMeta?.lastBackupAt && (Date.now()-new Date(backupMeta.lastBackupAt).getTime())>14*86400000?'stale':''}" id="homeBackupStatus"><span>💾</span><span>${escapeHtml(relativeBackupText(backupMeta?.lastBackupAt))}</span><span>›</span></button>
+    <button class="backup-status ${backupMeta?.lastBackupAt&&(Date.now()-new Date(backupMeta.lastBackupAt).getTime())>14*86400000?'stale':''}" id="homeBackupStatus"><span>💾</span><span>${escapeHtml(relativeBackupText(backupMeta?.lastBackupAt))}</span><span>›</span></button>
+
+    ${activeTrip?`<section class="section"><div class="section-head"><h2>Trip today</h2><button data-open-active-trip="${activeTrip.id}">Open trip</button></div><div class="trip-today-strip ${planThemeClass(activeTrip)}"><strong>${escapeHtml(activeTrip.title)}</strong><span>${escapeHtml(activeTrip.location||'')}</span><div><button data-trip-home-jump="itinerary">🗓 Schedule</button><button data-trip-home-jump="files">🎟 Tickets</button></div></div></section>`:''}
 
     <section class="section">
-      <div class="grid-2">
-        <button class="mini-card" data-home-go="tasks" style="text-align:left;border:1px solid var(--line)"><div class="metric">${openTasks.length}</div><div class="label">Open tasks</div></button>
-        <button class="mini-card" data-home-go="inbox" style="text-align:left;border:1px solid var(--line)"><div class="metric">${inbox.length}</div><div class="label">Inbox items</div></button>
+      <div class="section-head"><h2>Today</h2><button data-home-go="tasks">Tasks</button></div>
+      <div class="today-agenda">
+        ${todaySchedule.map(({plan,item})=>`<button class="agenda-row" data-home-schedule-plan="${plan.id}" data-home-schedule-id="${item.sourceId||item.id}"><div class="agenda-time">${escapeHtml(item.displayTime||item.time||(item.virtualMode==='stay'?'All day':'Anytime'))}</div><div class="agenda-icon">${itineraryEmoji(inferItineraryType(item))}</div><div><strong>${escapeHtml(item.displayTitle||item.title)}</strong><small>${escapeHtml(plan.title)}${filesForSchedule(files,item.sourceId||item.id).length?` · 📎 ${filesForSchedule(files,item.sourceId||item.id).length}`:''}</small></div><span>›</span></button>`).join('')}
+        ${todayTasks.map(t=>`<div class="agenda-task">${taskRowHtml(t,plans)}</div>`).join('')}
+        ${!agendaCount?`<div class="empty"><span class="empty-icon">✓</span><strong>Nothing urgent</strong><div>No tasks due and nothing scheduled for today.</div></div>`:''}
       </div>
     </section>
 
-    <section class="section">
-      <div class="section-head"><h2>Today</h2><button data-home-go="tasks">View tasks</button></div>
-      <div class="card">
-        ${todayTasks.length ? todayTasks.slice(0,5).map(t => taskRowHtml(t, plans)).join('') : `<div class="empty"><span class="empty-icon">✓</span><strong>Nothing urgent</strong><div>No tasks due today or overdue.</div></div>`}
-      </div>
-    </section>
+    <section class="section"><div class="grid-2"><button class="mini-card" data-home-go="tasks" style="text-align:left;border:1px solid var(--line)"><div class="metric">${openTasks.length}</div><div class="label">Open tasks</div></button><button class="mini-card" data-home-go="inbox" style="text-align:left;border:1px solid var(--line)"><div class="metric">${inbox.length}</div><div class="label">Inbox items</div></button></div></section>
 
-    <section class="section">
-      <div class="section-head"><h2>Next up</h2><button data-home-go="plans">View plans</button></div>
-      ${nextPlan ? planCardHtml(nextPlan, tasks) : `<div class="empty"><span class="empty-icon">✈️</span><strong>No plans yet</strong><div>Create a trip, event or project when you need one place for everything.</div></div>`}
-    </section>
+    ${!activeTrip?`<section class="section"><div class="section-head"><h2>Next up</h2><button data-home-go="plans">View plans</button></div>${nextPlan?planCardHtml(nextPlan,tasks,files):`<div class="empty"><span class="empty-icon">✈️</span><strong>No plans yet</strong><div>Create a trip, event or project when you need one place for everything.</div></div>`}</section>`:''}
 
-    <section class="section">
-      <div class="grid-2">
-        <div class="mini-card"><div class="metric">${waiting.length}</div><div class="label">Waiting for</div></div>
-        <div class="mini-card"><div class="metric">${shoppingRemaining}</div><div class="label">${shopping ? escapeHtml(shopping.name) : 'List items'}</div></div>
-      </div>
-    </section>
+    <section class="section"><div class="grid-2"><div class="mini-card"><div class="metric">${waiting.length}</div><div class="label">Waiting for</div></div><div class="mini-card"><div class="metric">${shoppingRemaining}</div><div class="label">${shopping?escapeHtml(shopping.name):'List items'}</div></div></div></section>
+    <section class="section"><div class="section-head"><h2>Recent & pinned files</h2><button data-home-go="vault">Open Vault</button></div>${recentFiles.length?recentFiles.map(compactFileHtml).join(''):`<div class="empty"><span class="empty-icon">▣</span><strong>Your Vault is empty</strong><div>PDFs, screenshots and tickets can be stored locally here.</div></div>`}</section>`;
 
-    <section class="section">
-      <div class="section-head"><h2>Recent files</h2><button data-home-go="vault">Open Vault</button></div>
-      ${recentFiles.length ? recentFiles.map(fileCardHtml).join('') : `<div class="empty"><span class="empty-icon">▣</span><strong>Your Vault is empty</strong><div>PDFs, screenshots and tickets can be stored locally here.</div></div>`}
-    </section>`;
-
-  app.querySelectorAll('[data-home-go]').forEach(el => el.onclick = () => setView(el.dataset.homeGo));
+  app.querySelectorAll('[data-home-go]').forEach(el=>el.onclick=()=>setView(el.dataset.homeGo));
   document.getElementById('homeBackupStatus').onclick=()=>{state.view='settings';document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));render();};
-  wireTaskRows();
-  wirePlanCards();
-  wireFileCards();
+  app.querySelectorAll('[data-home-schedule-plan]').forEach(btn=>btn.onclick=()=>{state.selectedPlanId=btn.dataset.homeSchedulePlan;state.planTab='itinerary';state.highlightItineraryItemId=btn.dataset.homeScheduleId;render();});
+  const activeBtn=app.querySelector('[data-open-active-trip]');if(activeBtn)activeBtn.onclick=()=>{state.selectedPlanId=activeBtn.dataset.openActiveTrip;state.planTab='overview';render();};
+  app.querySelectorAll('[data-trip-home-jump]').forEach(btn=>btn.onclick=()=>{state.selectedPlanId=activeTrip.id;state.planTab=btn.dataset.tripHomeJump;render();});
+  wireTaskRows();wirePlanCards();wireFileCards();
 }
 
 function sortTasks(a,b) {
@@ -275,17 +306,19 @@ function sortTasks(a,b) {
 }
 
 function taskRowHtml(task, plans = []) {
-  const plan = plans.find(p => p.id === task.planId);
-  const overdue = task.dueDate && task.dueDate < todayKey() && task.status !== 'done';
+  const plan=plans.find(p=>p.id===task.planId);
+  const overdue=task.dueDate&&task.dueDate<todayKey()&&task.status!=='done';
   return `<div class="task-row" data-task-id="${task.id}">
     <input class="task-check" type="checkbox" data-task-toggle="${task.id}" ${task.status==='done'?'checked':''} aria-label="Mark task complete">
-    <div>
+    <div class="task-main">
       <div class="task-title ${task.status==='done'?'done':''}">${escapeHtml(task.title)}</div>
+      ${task.notes?`<div class="task-notes-preview">${escapeHtml(task.notes)}</div>`:''}
       <div class="meta">
-        ${task.dueDate ? `<span class="pill ${overdue?'overdue':''}">${overdue?'Overdue · ':''}${formatShortDate(task.dueDate)}</span>` : ''}
-        ${task.status==='waiting' ? `<span class="pill waiting">Waiting</span>` : ''}
-        ${plan ? `<button class="pill plan" style="border:0" data-plan-open="${plan.id}">✈ ${escapeHtml(plan.title)}</button>` : ''}
-        ${task.category ? `<span class="pill">${escapeHtml(task.category)}</span>` : ''}
+        ${task.dueDate?`<span class="pill ${overdue?'overdue':''}">${overdue?'Overdue · ':''}${formatShortDate(task.dueDate)}</span>`:''}
+        ${task.status==='waiting'?`<span class="pill waiting">Waiting</span>`:''}
+        ${task.recurrence?`<span class="pill repeat">↻ ${recurrenceLabel(task.recurrence)}</span>`:''}
+        ${plan?`<button class="pill plan" style="border:0" data-plan-open="${plan.id}">✈ ${escapeHtml(plan.title)}</button>`:''}
+        ${task.category?`<span class="pill">${escapeHtml(task.category)}</span>`:''}
       </div>
     </div>
     <button class="text-btn small-btn" data-task-edit="${task.id}" aria-label="Edit task">•••</button>
@@ -293,17 +326,19 @@ function taskRowHtml(task, plans = []) {
 }
 
 async function wireTaskRows() {
-  app.querySelectorAll('[data-task-toggle]').forEach(el => el.onchange = async () => {
-    const task = await LifeDB.get('tasks', el.dataset.taskToggle);
-    if (!task) return;
-    task.status = el.checked ? 'done' : (task.previousStatus === 'waiting' ? 'waiting' : 'todo');
-    if (el.checked) task.previousStatus = task.status === 'done' ? (task.previousStatus || 'todo') : task.status;
-    task.updatedAt = nowIso();
-    await LifeDB.put('tasks', task);
-    render();
+  app.querySelectorAll('[data-task-toggle]').forEach(el=>el.onchange=async()=>{
+    const task=await LifeDB.get('tasks',el.dataset.taskToggle);if(!task)return;
+    if(el.checked&&task.recurrence&&task.dueDate&&task.status!=='done'){
+      task.lastCompletedAt=nowIso();task.dueDate=nextRecurringDate(task.dueDate,task.recurrence);task.status='todo';task.previousStatus='todo';task.updatedAt=nowIso();
+      await LifeDB.put('tasks',task);toast(`Completed · next due ${formatDate(task.dueDate)}`);render();return;
+    }
+    const before=task.status;
+    task.status=el.checked?'done':(task.previousStatus==='waiting'?'waiting':'todo');
+    if(el.checked)task.previousStatus=before==='waiting'?'waiting':'todo';
+    task.updatedAt=nowIso();await LifeDB.put('tasks',task);render();
   });
-  app.querySelectorAll('[data-task-edit]').forEach(el => el.onclick = () => openTaskForm(el.dataset.taskEdit));
-  app.querySelectorAll('[data-plan-open]').forEach(el => el.onclick = e => { e.stopPropagation(); state.selectedPlanId = el.dataset.planOpen; state.planTab='tasks'; render(); });
+  app.querySelectorAll('[data-task-edit]').forEach(el=>el.onclick=()=>openTaskForm(el.dataset.taskEdit));
+  app.querySelectorAll('[data-plan-open]').forEach(el=>el.onclick=e=>{e.stopPropagation();state.selectedPlanId=el.dataset.planOpen;state.planTab='tasks';render();});
 }
 
 async function renderTasks() {
@@ -329,36 +364,21 @@ async function renderTasks() {
   wireTaskRows();
 }
 
-async function openTaskForm(taskId = null, presetPlanId = null) {
-  const [plans, existing] = await Promise.all([LifeDB.getAll('plans'), taskId ? LifeDB.get('tasks', taskId) : Promise.resolve(null)]);
-  const task = existing || { title:'', dueDate:'', status:'todo', category:'', planId:presetPlanId || '', notes:'' };
-  showModal(taskId ? 'Edit task' : 'Add task', `
-    <form id="taskForm" class="form-grid">
-      <label>Task<input name="title" required maxlength="140" value="${escapeHtml(task.title)}" placeholder="e.g. Book Tallinn hotel"></label>
-      <label>Due date<input name="dueDate" type="date" value="${escapeHtml(task.dueDate || '')}"></label>
-      <label>Status<select name="status"><option value="todo" ${task.status==='todo'?'selected':''}>To do</option><option value="waiting" ${task.status==='waiting'?'selected':''}>Waiting for</option><option value="done" ${task.status==='done'?'selected':''}>Complete</option></select></label>
-      <label>Linked plan<select name="planId"><option value="">None</option>${plans.map(p=>`<option value="${p.id}" ${task.planId===p.id?'selected':''}>${escapeHtml(p.title)}</option>`).join('')}</select></label>
-      <label>Category<input name="category" maxlength="60" value="${escapeHtml(task.category || '')}" placeholder="Household, School, Shopping…"></label>
-      <label>Notes<textarea name="notes" placeholder="Optional details">${escapeHtml(task.notes || '')}</textarea></label>
-      <div class="form-actions">${taskId?`<button type="button" id="deleteTask" class="danger-btn">Delete</button>`:''}<button type="button" class="secondary-btn" id="cancelTask">Cancel</button><button class="primary-btn">Save task</button></div>
-    </form>`);
-  document.getElementById('cancelTask').onclick = closeModal;
-  if (taskId) document.getElementById('deleteTask').onclick = async () => { if (confirm('Delete this task?')) { await LifeDB.remove('tasks', taskId); closeModal(); render(); } };
-  document.getElementById('taskForm').onsubmit = async e => {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    const status = form.get('status');
-    const record = {
-      ...task,
-      id: task.id || uid('task'),
-      title: form.get('title').trim(), dueDate: form.get('dueDate'), status,
-      previousStatus: status === 'done' ? (task.previousStatus || 'todo') : status,
-      planId: form.get('planId'), category: form.get('category').trim(), notes: form.get('notes').trim(),
-      createdAt: task.createdAt || nowIso(), updatedAt: nowIso()
-    };
-    await LifeDB.put('tasks', record);
-    closeModal(); toast('Task saved'); render();
-  };
+async function openTaskForm(taskId=null,presetPlanId=null){
+  const [plans,existing]=await Promise.all([LifeDB.getAll('plans'),taskId?LifeDB.get('tasks',taskId):Promise.resolve(null)]);
+  const task=existing||{title:'',dueDate:'',status:'todo',category:'',planId:presetPlanId||'',notes:'',recurrence:''};
+  showModal(taskId?'Edit task':'Add task',`<form id="taskForm" class="form-grid">
+    <label>Task<input name="title" required maxlength="140" value="${escapeHtml(task.title)}" placeholder="e.g. Book Tallinn hotel"></label>
+    <label>Due date<input name="dueDate" type="date" value="${escapeHtml(task.dueDate||'')}"></label>
+    <div class="grid-2"><label>Status<select name="status"><option value="todo" ${task.status==='todo'?'selected':''}>To do</option><option value="waiting" ${task.status==='waiting'?'selected':''}>Waiting for</option><option value="done" ${task.status==='done'?'selected':''}>Complete</option></select></label><label>Repeat<select name="recurrence"><option value="">Does not repeat</option><option value="daily" ${task.recurrence==='daily'?'selected':''}>Daily</option><option value="weekly" ${task.recurrence==='weekly'?'selected':''}>Weekly</option><option value="monthly" ${task.recurrence==='monthly'?'selected':''}>Monthly</option><option value="yearly" ${task.recurrence==='yearly'?'selected':''}>Yearly</option></select></label></div>
+    <label>Linked plan<select name="planId"><option value="">None</option>${plans.map(p=>`<option value="${p.id}" ${task.planId===p.id?'selected':''}>${escapeHtml(p.title)}</option>`).join('')}</select></label>
+    <label>Category<input name="category" maxlength="60" value="${escapeHtml(task.category||'')}" placeholder="Household, School, Shopping…"></label>
+    <label>Notes<textarea name="notes" placeholder="Optional details">${escapeHtml(task.notes||'')}</textarea></label>
+    <div class="form-actions">${taskId?`<button type="button" id="deleteTask" class="danger-btn">Delete</button>`:''}<button type="button" class="secondary-btn" id="cancelTask">Cancel</button><button class="primary-btn">Save task</button></div>
+  </form>`);
+  document.getElementById('cancelTask').onclick=closeModal;
+  if(taskId)document.getElementById('deleteTask').onclick=async()=>{if(confirm('Delete this task?')){const fs=await LifeDB.getAll('files');for(const file of fs.filter(f=>fileTaskIds(f).includes(taskId))){file.taskIds=fileTaskIds(file).filter(id=>id!==taskId);file.updatedAt=nowIso();await LifeDB.put('files',file);}await LifeDB.remove('tasks',taskId);closeModal();render();}};
+  document.getElementById('taskForm').onsubmit=async e=>{e.preventDefault();const form=new FormData(e.currentTarget);const status=form.get('status');const recurrence=form.get('recurrence')||'';if(recurrence&&!form.get('dueDate')){alert('Recurring tasks need a due date so Life Dashboard knows when the next one should occur.');return;}const record={...task,id:task.id||uid('task'),title:form.get('title').trim(),dueDate:form.get('dueDate'),status,previousStatus:status==='done'?(task.previousStatus||'todo'):status,planId:form.get('planId'),category:form.get('category').trim(),notes:form.get('notes').trim(),recurrence,createdAt:task.createdAt||nowIso(),updatedAt:nowIso()};await LifeDB.put('tasks',record);closeModal();toast('Task saved');render();};
 }
 
 async function renderLists() {
@@ -373,31 +393,23 @@ async function renderLists() {
   app.querySelectorAll('[data-list-open]').forEach(btn => btn.onclick = () => { state.selectedListId = btn.dataset.listOpen; render(); });
 }
 
-async function openListForm() {
-  showModal('Create list', `<form id="listForm" class="form-grid"><label>Name<input name="name" required maxlength="80" placeholder="Tesco, Packing, Christmas ideas…"></label><label>Type<select name="type"><option value="general">General checklist</option><option value="shopping">Shopping / groceries</option></select></label><div class="form-actions"><button type="button" class="secondary-btn" id="cancelList">Cancel</button><button class="primary-btn">Create list</button></div></form>`);
-  document.getElementById('cancelList').onclick = closeModal;
-  document.getElementById('listForm').onsubmit = async e => {
-    e.preventDefault(); const f=new FormData(e.currentTarget);
-    const list={id:uid('list'),name:f.get('name').trim(),type:f.get('type'),items:[],createdAt:nowIso(),updatedAt:nowIso()};
-    await LifeDB.put('lists',list); closeModal(); state.selectedListId=list.id; render();
-  };
+async function openListForm(listId=null){
+  const [existing,templates]=await Promise.all([listId?LifeDB.get('lists',listId):Promise.resolve(null),LifeDB.getAll('templates')]);
+  const list=existing||{name:'',type:'general',items:[]};
+  showModal(listId?'Edit list':'Create list',`<form id="listForm" class="form-grid"><label>Name<input name="name" required maxlength="80" value="${escapeHtml(list.name||'')}" placeholder="Tesco, Packing, Christmas ideas…"></label><label>Type<select name="type"><option value="general" ${list.type==='general'?'selected':''}>General checklist</option><option value="shopping" ${list.type==='shopping'?'selected':''}>Shopping / groceries</option></select></label>${!listId&&templates.length?`<label>Start from template <small>(optional)</small><select name="templateId"><option value="">Blank list</option>${templates.filter(t=>t.type==='checklist').map(t=>`<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')}</select></label>`:''}<div class="form-actions"><button type="button" class="secondary-btn" id="cancelList">Cancel</button><button class="primary-btn">${listId?'Save changes':'Create list'}</button></div></form>`);
+  document.getElementById('cancelList').onclick=closeModal;
+  document.getElementById('listForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);let items=list.items||[];if(!listId&&f.get('templateId')){const t=templates.find(x=>x.id===f.get('templateId'));items=(t?.items||[]).map(text=>({id:uid('item'),text,checked:false}));}const record={...list,id:list.id||uid('list'),name:f.get('name').trim(),type:f.get('type'),items,createdAt:list.createdAt||nowIso(),updatedAt:nowIso()};await LifeDB.put('lists',record);closeModal();state.selectedListId=record.id;render();};
 }
 
-async function renderListDetail(id) {
-  const list = await LifeDB.get('lists', id);
-  if (!list) { state.selectedListId=null; return renderLists(); }
-  setTitle(list.name);
-  const items = list.items || [];
-  app.innerHTML = `
-    <div class="back-row"><button id="backLists">‹ Lists</button></div>
-    <section class="section"><div class="card">
-      <div class="card-row"><div><div class="card-title">${list.type==='shopping'?'🛒':'☑'} ${escapeHtml(list.name)}</div><div class="card-subtitle">${items.filter(i=>!i.checked).length} remaining</div></div><button id="deleteList" class="text-btn">Delete</button></div>
-      <div style="margin-top:10px">${items.length ? items.map(item=>`<div class="list-item-row ${item.checked?'checked':''}"><input class="task-check" type="checkbox" data-list-toggle="${item.id}" ${item.checked?'checked':''}><div class="list-item-text">${escapeHtml(item.text)}</div><button class="text-btn" data-list-delete="${item.id}">×</button></div>`).join('') : `<div class="empty"><strong>List is empty</strong><div>Add the first item below.</div></div>`}</div>
-      <form id="inlineListAdd" class="inline-add"><input name="text" required maxlength="120" autocomplete="off" placeholder="Add an item"><button class="primary-btn">Add</button></form>
-    </div></section>`;
-  document.getElementById('backLists').onclick = () => {state.selectedListId=null; state.view='lists'; render();};
-  document.getElementById('deleteList').onclick = async () => { if(confirm(`Delete “${list.name}”?`)){await LifeDB.remove('lists',id);state.selectedListId=null;renderLists();} };
-  app.querySelectorAll('[data-list-toggle]').forEach(el=>el.onchange=async()=>{const item=items.find(i=>i.id===el.dataset.listToggle); item.checked=el.checked; list.updatedAt=nowIso(); await LifeDB.put('lists',list); render();});
+async function renderListDetail(id){
+  const list=await LifeDB.get('lists',id);if(!list){state.selectedListId=null;return renderLists();}
+  setTitle(list.name);const items=list.items||[];
+  app.innerHTML=`<div class="back-row"><button id="backLists">‹ Lists</button></div><section class="section"><div class="card"><div class="card-row"><div><div class="card-title">${list.type==='shopping'?'🛒':'☑'} ${escapeHtml(list.name)}</div><div class="card-subtitle">${items.filter(i=>!i.checked).length} remaining</div></div><div class="compact-actions"><button id="editList" class="secondary-btn small-btn">Rename</button><button id="saveListTemplate" class="secondary-btn small-btn">Template</button><button id="deleteList" class="text-btn small-btn">Delete</button></div></div><div style="margin-top:10px">${items.length?items.map(item=>`<div class="list-item-row ${item.checked?'checked':''}"><input class="task-check" type="checkbox" data-list-toggle="${item.id}" ${item.checked?'checked':''}><div class="list-item-text">${escapeHtml(item.text)}</div><button class="text-btn" data-list-delete="${item.id}">×</button></div>`).join(''):`<div class="empty"><strong>List is empty</strong><div>Add the first item below.</div></div>`}</div><form id="inlineListAdd" class="inline-add"><input name="text" required maxlength="120" autocomplete="off" placeholder="Add an item"><button class="primary-btn">Add</button></form></div></section>`;
+  document.getElementById('backLists').onclick=()=>{state.selectedListId=null;state.view='lists';render();};
+  document.getElementById('editList').onclick=()=>openListForm(id);
+  document.getElementById('saveListTemplate').onclick=()=>saveChecklistTemplate(list.name,items.map(i=>i.text));
+  document.getElementById('deleteList').onclick=async()=>{if(confirm(`Delete “${list.name}”?`)){await LifeDB.remove('lists',id);state.selectedListId=null;renderLists();}};
+  app.querySelectorAll('[data-list-toggle]').forEach(el=>el.onchange=async()=>{const item=items.find(i=>i.id===el.dataset.listToggle);item.checked=el.checked;list.updatedAt=nowIso();await LifeDB.put('lists',list);render();});
   app.querySelectorAll('[data-list-delete]').forEach(el=>el.onclick=async()=>{list.items=items.filter(i=>i.id!==el.dataset.listDelete);list.updatedAt=nowIso();await LifeDB.put('lists',list);render();});
   document.getElementById('inlineListAdd').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);list.items=[...(list.items||[]),{id:uid('item'),text:f.get('text').trim(),checked:false}];list.updatedAt=nowIso();await LifeDB.put('lists',list);render();};
 }
@@ -410,22 +422,15 @@ async function renderPlans() {
   wirePlanCards();
 }
 
-function planCardHtml(plan,tasks=[],files=[]) {
-  const remaining = tasks.filter(t=>t.planId===plan.id && t.status!=='done').length;
-  const fileCount = files.filter(f=>f.planId===plan.id).length;
-  const scheduleCount=(plan.itinerary||[]).length;
-  const d = daysUntil(plan.startDate);
-  const timing = d === null ? '' : d < 0 ? (plan.endDate && plan.endDate>=todayKey()?'Underway':'Complete') : d === 0 ? 'Today' : `${d} day${d===1?'':'s'} away`;
-  if(plan.type==='trip'){
-    return `<button class="trip-list-card ${planThemeClass(plan)}" data-plan-card="${plan.id}" style="width:100%;text-align:left">
-      <div class="trip-list-top"><span class="trip-list-emoji">✈️</span><span class="trip-countdown">${escapeHtml(tripCountdownText(plan))}</span></div>
-      <div class="trip-list-title">${escapeHtml(plan.title)}</div>
-      <div class="trip-list-subtitle">${[plan.location,plan.startDate?formatDate(plan.startDate):'',plan.endDate?formatDate(plan.endDate):''].filter(Boolean).join(' · ') || 'Add dates and destination'}</div>
-      <div class="trip-list-stats"><span>✓ ${remaining} to do</span><span>🗓 ${scheduleCount}</span><span>📎 ${fileCount}</span></div>
-    </button>`;
-  }
+function planCardHtml(plan,tasks=[],files=[]){
+  const linkedTasks=tasks.filter(t=>t.planId===plan.id);const remaining=linkedTasks.filter(t=>t.status!=='done').length;
+  const fileCount=files.filter(f=>fileLinkedToPlan(f,plan,linkedTasks)).length;const scheduleCount=(plan.itinerary||[]).length;
+  const toBook=(plan.itinerary||[]).filter(i=>i.bookingStatus==='planned').length;
+  const d=daysUntil(plan.startDate);const timing=d===null?'':d<0?(plan.endDate&&plan.endDate>=todayKey()?'Underway':'Complete'):d===0?'Today':`${d} day${d===1?'':'s'} away`;
+  if(plan.type==='trip')return `<button class="trip-list-card ${planThemeClass(plan)}" data-plan-card="${plan.id}" style="width:100%;text-align:left"><div class="trip-list-top"><span class="trip-list-emoji">✈️</span><span class="trip-countdown">${escapeHtml(tripCountdownText(plan))}</span></div><div class="trip-list-title">${escapeHtml(plan.title)}</div><div class="trip-list-subtitle">${[plan.location,plan.startDate?formatDate(plan.startDate):'',plan.endDate?formatDate(plan.endDate):''].filter(Boolean).join(' · ')||'Add dates and destination'}</div><div class="trip-list-stats"><span>✓ ${remaining} to do</span>${toBook?`<span>○ ${toBook} to book</span>`:''}<span>🗓 ${scheduleCount}</span><span>📎 ${fileCount}</span></div></button>`;
   return `<button class="card" data-plan-card="${plan.id}" style="width:100%;text-align:left"><div class="card-row"><div><div class="card-title">${planEmoji(plan.type)} ${escapeHtml(plan.title)}</div><div class="card-subtitle">${[plan.startDate?formatDate(plan.startDate):'',plan.location,timing].filter(Boolean).join(' · ')}</div><div class="meta"><span class="pill plan">${remaining} task${remaining===1?'':'s'} remaining</span></div></div><span>›</span></div></button>`;
 }
+
 function planEmoji(type){return ({trip:'✈️',event:'🎟️',project:'🛠️',dayout:'📍'})[type]||'📌';}
 function wirePlanCards(){app.querySelectorAll('[data-plan-card]').forEach(btn=>btn.onclick=()=>{state.selectedPlanId=btn.dataset.planCard;state.planTab='overview';render();});}
 
@@ -448,7 +453,7 @@ async function openPlanForm(planId=null) {
     if(startInput.value && endInput.value && endInput.value<startInput.value){endInput.value=startInput.value;toast('End date adjusted to match the start date');}
   };
   startInput.onchange=syncPlanDates; syncPlanDates();
-  if(planId) document.getElementById('deletePlan').onclick=async()=>{if(confirm('Delete this plan? Linked tasks and files will remain but become unlinked.')){const [tasks,files]=await Promise.all([LifeDB.getAll('tasks'),LifeDB.getAll('files')]);for(const t of tasks.filter(x=>x.planId===planId)){t.planId='';await LifeDB.put('tasks',t);}for(const f of files.filter(x=>x.planId===planId)){f.planId='';f.itineraryItemId='';await LifeDB.put('files',f);}await LifeDB.remove('plans',planId);state.selectedPlanId=null;closeModal();renderPlans();}};
+  if(planId) document.getElementById('deletePlan').onclick=async()=>{if(confirm('Delete this plan? Linked tasks and files will remain but become unlinked.')){const [tasks,files]=await Promise.all([LifeDB.getAll('tasks'),LifeDB.getAll('files')]);const itineraryIds=new Set((p.itinerary||[]).map(i=>i.id));for(const t of tasks.filter(x=>x.planId===planId)){t.planId='';await LifeDB.put('tasks',t);}for(const file of files){file.planIds=filePlanIds(file).filter(id=>id!==planId);file.itineraryItemIds=fileItineraryIds(file).filter(id=>!itineraryIds.has(id));if(file.planId===planId)file.planId='';if(itineraryIds.has(file.itineraryItemId))file.itineraryItemId='';file.updatedAt=nowIso();await LifeDB.put('files',file);}await LifeDB.remove('plans',planId);state.selectedPlanId=null;closeModal();renderPlans();}};
   document.getElementById('planForm').onsubmit=async e=>{
     e.preventDefault();const f=new FormData(e.currentTarget);
     const startDate=f.get('startDate'),endDate=f.get('endDate');
@@ -458,90 +463,28 @@ async function openPlanForm(planId=null) {
   };
 }
 
-async function renderPlanDetail(id) {
-  const [plan,tasks,files] = await Promise.all([LifeDB.get('plans',id),LifeDB.getAll('tasks'),LifeDB.getAll('files')]);
-  if(!plan){state.selectedPlanId=null;return renderPlans();}
-  setTitle(plan.title);
-  const linkedTasks=tasks.filter(t=>t.planId===id).sort(sortTasks);
-  const linkedFiles=files.filter(f=>f.planId===id).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  const itinerary=expandedItinerary(plan);
-  const nextItem=nextItineraryItem(plan);
-  const openCount=linkedTasks.filter(t=>t.status!=='done').length;
-  const phase=planPhase(plan,openCount);
-  const tabs=['overview','tasks','itinerary','checklist','files'];
-  const isTrip=plan.type==='trip';
-  app.innerHTML=`<div class="back-row"><button id="backPlans">‹ Plans</button></div>
-    <section class="plan-hero ${isTrip?`trip-hero ${planThemeClass(plan)}`:''}">
-      <div class="trip-hero-top"><div class="trip-hero-icon">${planEmoji(plan.type)}</div><button id="editPlan" class="${isTrip?'trip-edit-btn':'secondary-btn small-btn'}">Edit</button></div>
-      <h2>${escapeHtml(plan.title)}</h2>
-      <div class="${isTrip?'trip-location':'card-subtitle'}">${escapeHtml(plan.location||'')}</div>
-      <div class="${isTrip?'trip-dates':'card-subtitle'}">${[plan.startDate?formatDate(plan.startDate):'',plan.endDate?formatDate(plan.endDate):''].filter(Boolean).join(' — ') || 'No dates set'}</div>
-      ${isTrip?`<div class="trip-hero-badges"><span>${escapeHtml(tripCountdownText(plan))}</span><span>${phase.label}</span></div>`:''}
-    </section>
-    ${isTrip?`<div class="trip-progress"><span class="${phase.key==='planning'?'active':''}">Planning</span><span class="${phase.key==='ready'?'active':''}">Ready</span><span class="${phase.key==='travelling'?'active':''}">Travelling</span><span class="${phase.key==='complete'?'active':''}">Complete</span></div>`:''}
-    <div class="plan-tabs">${tabs.map(t=>`<button data-plan-tab="${t}" class="${state.planTab===t?'active':''}">${t==='itinerary'?'Schedule':t[0].toUpperCase()+t.slice(1)}</button>`).join('')}</div>
-    <section id="planTabContent"></section>`;
-  document.getElementById('backPlans').onclick=()=>{state.selectedPlanId=null;state.view='plans';render();};
-  document.getElementById('editPlan').onclick=()=>openPlanForm(id);
-  app.querySelectorAll('[data-plan-tab]').forEach(btn=>btn.onclick=()=>{state.planTab=btn.dataset.planTab;render();});
-  const c=document.getElementById('planTabContent');
+async function renderPlanDetail(id){
+  const [plan,tasks,files]=await Promise.all([LifeDB.get('plans',id),LifeDB.getAll('tasks'),LifeDB.getAll('files')]);if(!plan){state.selectedPlanId=null;return renderPlans();}
+  setTitle(plan.title);const linkedTasks=tasks.filter(t=>t.planId===id).sort(sortTasks);const linkedFiles=files.filter(f=>fileLinkedToPlan(f,plan,linkedTasks)).sort((a,b)=>(b.pinned===true)-(a.pinned===true)||(b.createdAt||'').localeCompare(a.createdAt||''));const itinerary=expandedItinerary(plan);const nextItem=nextItineraryItem(plan);const openCount=linkedTasks.filter(t=>t.status!=='done').length;const plannedCount=(plan.itinerary||[]).filter(i=>i.bookingStatus==='planned').length;const phase=planPhase(plan,openCount,plannedCount);const tabs=['overview','tasks','itinerary','checklist','files'];const isTrip=plan.type==='trip';const todayItems=itinerary.filter(i=>(i.displayDate||i.date)===todayKey());
+  app.innerHTML=`<div class="back-row"><button id="backPlans">‹ Plans</button></div><section class="plan-hero ${isTrip?`trip-hero ${planThemeClass(plan)}`:''}"><div class="trip-hero-top"><div class="trip-hero-icon">${planEmoji(plan.type)}</div><button id="editPlan" class="${isTrip?'trip-edit-btn':'secondary-btn small-btn'}">Edit</button></div><h2>${escapeHtml(plan.title)}</h2><div class="${isTrip?'trip-location':'card-subtitle'}">${escapeHtml(plan.location||'')}</div><div class="${isTrip?'trip-dates':'card-subtitle'}">${[plan.startDate?formatDate(plan.startDate):'',plan.endDate?formatDate(plan.endDate):''].filter(Boolean).join(' — ')||'No dates set'}</div>${isTrip?`<div class="trip-hero-badges"><span>${escapeHtml(tripCountdownText(plan))}</span><span>${phase.label}</span>${plannedCount?`<span>${plannedCount} to book</span>`:''}</div>`:''}</section>${isTrip?`<div class="trip-progress"><span class="${phase.key==='planning'?'active':''}">Planning</span><span class="${phase.key==='ready'?'active':''}">Ready</span><span class="${phase.key==='travelling'?'active':''}">Travelling</span><span class="${phase.key==='complete'?'active':''}">Complete</span></div>`:''}<div class="plan-tabs">${tabs.map(t=>`<button data-plan-tab="${t}" class="${state.planTab===t?'active':''}">${t==='itinerary'?'Schedule':t[0].toUpperCase()+t.slice(1)}</button>`).join('')}</div><section id="planTabContent"></section>`;
+  document.getElementById('backPlans').onclick=()=>{state.selectedPlanId=null;state.view='plans';render();};document.getElementById('editPlan').onclick=()=>openPlanForm(id);app.querySelectorAll('[data-plan-tab]').forEach(btn=>btn.onclick=()=>{state.planTab=btn.dataset.planTab;render();});const c=document.getElementById('planTabContent');
   if(state.planTab==='overview'){
-    c.innerHTML=`
-      ${isTrip && nextItem?`<section class="section"><div class="section-head"><h2>Next up</h2><button id="openNextSchedule">Schedule</button></div>${nextUpHtml(nextItem,linkedFiles)}</section>`:''}
-      ${isTrip?`<section class="trip-quick-grid">
-        <button data-trip-jump="itinerary"><span>🗓️</span><strong>Schedule</strong><small>${(plan.itinerary||[]).length} item${(plan.itinerary||[]).length===1?'':'s'}</small></button>
-        <button data-trip-jump="files"><span>🎟️</span><strong>Tickets & files</strong><small>${linkedFiles.length} stored</small></button>
-        <button data-trip-jump="checklist"><span>🧳</span><strong>Packing</strong><small>${(plan.checklist||[]).filter(i=>!i.checked).length} left</small></button>
-        <button data-trip-jump="tasks"><span>✓</span><strong>Tasks</strong><small>${openCount} remaining</small></button>
-      </section>`:`<div class="grid-2"><div class="mini-card"><div class="metric">${openCount}</div><div class="label">Tasks remaining</div></div><div class="mini-card"><div class="metric">${linkedFiles.length}</div><div class="label">Files attached</div></div></div>`}
-      <section class="section"><div class="section-head"><h2>Notes</h2></div><div class="card"><div class="card-subtitle" style="white-space:pre-wrap;color:var(--text)">${plan.notes?escapeHtml(plan.notes):'No notes yet. Use Edit to add an overview, addresses or booking references.'}</div></div></section>
-      <section class="section"><div class="section-head"><h2>Next tasks</h2><button id="overviewAddTask">Add</button></div><div class="card">${linkedTasks.filter(t=>t.status!=='done').slice(0,4).map(t=>taskRowHtml(t,[plan])).join('')||'<div class="empty"><strong>No open tasks</strong></div>'}</div></section>`;
-    document.getElementById('overviewAddTask').onclick=()=>openTaskForm(null,id); wireTaskRows();
-    c.querySelectorAll('[data-trip-jump]').forEach(btn=>btn.onclick=()=>{state.planTab=btn.dataset.tripJump;render();});
-    const nextBtn=document.getElementById('openNextSchedule'); if(nextBtn) nextBtn.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=nextItem?.sourceId||nextItem?.id||null;render();};
-    const nextCard=c.querySelector('[data-next-schedule]'); if(nextCard) nextCard.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=nextCard.dataset.nextSchedule;render();};
+    const travelling=phase.key==='travelling';
+    c.innerHTML=`${travelling?`<section class="section"><div class="section-head"><h2>Today</h2><button data-trip-jump="itinerary">Full schedule</button></div>${todayItems.length?timelineHtml(plan,todayItems,linkedFiles):`<div class="empty"><strong>Nothing scheduled today</strong><div>Your next scheduled item will appear below.</div></div>`}</section>`:''}${isTrip&&nextItem?`<section class="section"><div class="section-head"><h2>${travelling?'Next':'Next up'}</h2><button id="openNextSchedule">Schedule</button></div>${nextUpHtml(nextItem,linkedFiles)}</section>`:isTrip&&travelling?`<section class="section"><div class="empty"><strong>No more scheduled items</strong><div>You’ve reached the end of the current itinerary.</div></div></section>`:''}${isTrip?`<section class="trip-quick-grid">${travelling?`<button data-trip-jump="files"><span>🎟️</span><strong>Tickets & files</strong><small>${linkedFiles.length} stored</small></button><button data-trip-jump="itinerary"><span>🗓️</span><strong>Schedule</strong><small>${(plan.itinerary||[]).length} items</small></button>`:`<button data-trip-jump="itinerary"><span>🗓️</span><strong>Schedule</strong><small>${(plan.itinerary||[]).length} items</small></button><button data-trip-jump="files"><span>🎟️</span><strong>Tickets & files</strong><small>${linkedFiles.length} stored</small></button>`}<button data-trip-jump="checklist"><span>🧳</span><strong>${travelling?'Checklist':'Packing'}</strong><small>${(plan.checklist||[]).filter(i=>!i.checked).length} left</small></button><button data-trip-jump="tasks"><span>✓</span><strong>Tasks</strong><small>${openCount} remaining</small></button></section>`:`<div class="grid-2"><div class="mini-card"><div class="metric">${openCount}</div><div class="label">Tasks remaining</div></div><div class="mini-card"><div class="metric">${linkedFiles.length}</div><div class="label">Files attached</div></div></div>`}${!travelling&&plannedCount?`<section class="section"><div class="section-head"><h2>Still to book</h2></div><div class="card">${(plan.itinerary||[]).filter(i=>i.bookingStatus==='planned').slice(0,5).map(i=>`<button class="booking-row" data-booking-open="${i.id}"><span>${itineraryEmoji(inferItineraryType(i))}</span><strong>${escapeHtml(i.title)}</strong><span>Planned ›</span></button>`).join('')}</div></section>`:''}<section class="section"><div class="section-head"><h2>Notes</h2></div><div class="card"><div class="card-subtitle" style="white-space:pre-wrap;color:var(--text)">${plan.notes?escapeHtml(plan.notes):'No notes yet. Use Edit to add an overview, addresses or booking references.'}</div></div></section><section class="section"><div class="section-head"><h2>Next tasks</h2><button id="overviewAddTask">Add</button></div><div class="card">${linkedTasks.filter(t=>t.status!=='done').slice(0,4).map(t=>taskRowHtml(t,[plan])).join('')||'<div class="empty"><strong>No open tasks</strong></div>'}</div></section>`;
+    document.getElementById('overviewAddTask').onclick=()=>openTaskForm(null,id);wireTaskRows();c.querySelectorAll('[data-trip-jump]').forEach(btn=>btn.onclick=()=>{state.planTab=btn.dataset.tripJump;render();});c.querySelectorAll('[data-booking-open]').forEach(btn=>btn.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=btn.dataset.bookingOpen;render();});const nextBtn=document.getElementById('openNextSchedule');if(nextBtn)nextBtn.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=nextItem?.sourceId||nextItem?.id||null;render();};const nextCard=c.querySelector('[data-next-schedule]');if(nextCard)nextCard.onclick=()=>{state.planTab='itinerary';state.highlightItineraryItemId=nextCard.dataset.nextSchedule;render();};wireFileCards(c);
   }
-  if(state.planTab==='tasks'){
-    c.innerHTML=`<div class="section-head"><h2>${openCount} remaining</h2><button id="planAddTask">Add task</button></div><div class="card">${linkedTasks.length?linkedTasks.map(t=>taskRowHtml(t,[plan])).join(''):'<div class="empty"><strong>No linked tasks</strong><div>Tasks added here also appear in the main Tasks screen.</div></div>'}</div>`;
-    document.getElementById('planAddTask').onclick=()=>openTaskForm(null,id); wireTaskRows();
-  }
+  if(state.planTab==='tasks'){c.innerHTML=`<div class="section-head"><h2>${openCount} remaining</h2><button id="planAddTask">Add task</button></div><div class="card">${linkedTasks.length?linkedTasks.map(t=>taskRowHtml(t,[plan])).join(''):'<div class="empty"><strong>No linked tasks</strong><div>Tasks added here also appear in the main Tasks screen.</div></div>'}</div>`;document.getElementById('planAddTask').onclick=()=>openTaskForm(null,id);wireTaskRows();}
   if(state.planTab==='itinerary'){
-    c.innerHTML=`<div class="section-head"><h2>Schedule</h2><button id="addItinerary">Add item</button></div>${itinerary.length?timelineHtml(plan,itinerary,linkedFiles):'<div class="empty"><strong>No schedule yet</strong><div>Add flights, trains, check-ins, ferries, activities or anything time-specific.</div></div>'}`;
-    document.getElementById('addItinerary').onclick=()=>openItineraryForm(plan);
-    c.querySelectorAll('[data-it-edit]').forEach(btn=>btn.onclick=()=>openItineraryForm(plan,btn.dataset.itEdit));
-    c.querySelectorAll('[data-it-delete]').forEach(btn=>btn.onclick=async()=>{
-      const itemId=btn.dataset.itDelete;
-      if(!confirm('Remove this schedule item? Any attached files will stay in the trip Files area and Vault.')) return;
-      plan.itinerary=(plan.itinerary||[]).filter(x=>x.id!==itemId);plan.updatedAt=nowIso();
-      for(const f of linkedFiles.filter(f=>f.itineraryItemId===itemId)){f.itineraryItemId='';f.updatedAt=nowIso();await LifeDB.put('files',f);}
-      await LifeDB.put('plans',plan);render();
-    });
-    c.querySelectorAll('[data-it-add-file]').forEach(btn=>btn.onclick=()=>openAttachmentPicker(id,btn.dataset.itAddFile));
-    wireFileCards();
-    if(state.highlightItineraryItemId){
-      const targetId=state.highlightItineraryItemId; state.highlightItineraryItemId=null;
-      requestAnimationFrame(()=>{const target=c.querySelector(`[data-it-item="${targetId}"]`);if(target){target.classList.add('schedule-highlight');target.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>target.classList.remove('schedule-highlight'),1800);}});
-    }
+    c.innerHTML=`<div class="section-head"><h2>Schedule</h2><button id="addItinerary">Add item</button></div>${itinerary.length?timelineHtml(plan,itinerary,linkedFiles):'<div class="empty"><strong>No schedule yet</strong><div>Add flights, trains, check-ins, ferries, activities or anything time-specific.</div></div>'}`;document.getElementById('addItinerary').onclick=()=>openItineraryForm(plan);c.querySelectorAll('[data-it-edit]').forEach(btn=>btn.onclick=()=>openItineraryForm(plan,btn.dataset.itEdit));c.querySelectorAll('[data-it-delete]').forEach(btn=>btn.onclick=async()=>{const itemId=btn.dataset.itDelete;if(!confirm('Remove this schedule item? Any attached files will stay in the trip Files area and Vault.'))return;plan.itinerary=(plan.itinerary||[]).filter(x=>x.id!==itemId);plan.updatedAt=nowIso();for(const f of linkedFiles.filter(f=>fileItineraryIds(f).includes(itemId))){f.itineraryItemIds=fileItineraryIds(f).filter(x=>x!==itemId);if(f.itineraryItemId===itemId)f.itineraryItemId='';f.updatedAt=nowIso();await LifeDB.put('files',f);}await LifeDB.put('plans',plan);render();});c.querySelectorAll('[data-it-add-file]').forEach(btn=>btn.onclick=()=>openAttachmentPicker(id,btn.dataset.itAddFile));wireFileCards(c);if(state.highlightItineraryItemId){const targetId=state.highlightItineraryItemId;state.highlightItineraryItemId=null;requestAnimationFrame(()=>{const target=c.querySelector(`[data-it-item="${targetId}"]`);if(target){target.classList.add('schedule-highlight');target.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>target.classList.remove('schedule-highlight'),1800);}});}
   }
   if(state.planTab==='checklist'){
-    const items=plan.checklist||[];
-    c.innerHTML=`<div class="section-head"><h2>${items.filter(i=>!i.checked).length} remaining</h2></div><div class="card">${items.length?items.map(i=>`<div class="list-item-row ${i.checked?'checked':''}"><input class="task-check" type="checkbox" data-plan-check="${i.id}" ${i.checked?'checked':''}><div class="list-item-text">${escapeHtml(i.text)}</div><button class="text-btn" data-plan-check-delete="${i.id}">×</button></div>`).join(''):'<div class="empty"><strong>No checklist yet</strong><div>Ideal for packing or pre-departure items that do not need to be full tasks.</div></div>'}<form id="planChecklistAdd" class="inline-add"><input name="text" required maxlength="120" placeholder="Add checklist item"><button class="primary-btn">Add</button></form></div>`;
-    c.querySelectorAll('[data-plan-check]').forEach(el=>el.onchange=async()=>{const item=items.find(i=>i.id===el.dataset.planCheck);item.checked=el.checked;plan.updatedAt=nowIso();await LifeDB.put('plans',plan);render();});
-    c.querySelectorAll('[data-plan-check-delete]').forEach(el=>el.onclick=async()=>{plan.checklist=items.filter(i=>i.id!==el.dataset.planCheckDelete);await LifeDB.put('plans',plan);render();});
-    document.getElementById('planChecklistAdd').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);plan.checklist=[...(plan.checklist||[]),{id:uid('check'),text:f.get('text').trim(),checked:false}];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);render();};
+    const items=plan.checklist||[];c.innerHTML=`<div class="section-head"><h2>${items.filter(i=>!i.checked).length} remaining</h2><div class="section-head-actions"><button id="useChecklistTemplate">Use template</button><button id="saveChecklistTemplate">Save template</button></div></div><div class="card">${items.length?items.map(i=>`<div class="list-item-row ${i.checked?'checked':''}"><input class="task-check" type="checkbox" data-plan-check="${i.id}" ${i.checked?'checked':''}><div class="list-item-text">${escapeHtml(i.text)}</div><button class="text-btn" data-plan-check-delete="${i.id}">×</button></div>`).join(''):'<div class="empty"><strong>No checklist yet</strong><div>Use a reusable template or add items below.</div></div>'}<form id="planChecklistAdd" class="inline-add"><input name="text" required maxlength="120" placeholder="Add checklist item"><button class="primary-btn">Add</button></form></div>`;c.querySelectorAll('[data-plan-check]').forEach(el=>el.onchange=async()=>{const item=items.find(i=>i.id===el.dataset.planCheck);item.checked=el.checked;plan.updatedAt=nowIso();await LifeDB.put('plans',plan);render();});c.querySelectorAll('[data-plan-check-delete]').forEach(el=>el.onclick=async()=>{plan.checklist=items.filter(i=>i.id!==el.dataset.planCheckDelete);await LifeDB.put('plans',plan);render();});document.getElementById('planChecklistAdd').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);plan.checklist=[...(plan.checklist||[]),{id:uid('check'),text:f.get('text').trim(),checked:false}];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);render();};document.getElementById('useChecklistTemplate').onclick=()=>openChecklistTemplatePicker(plan);document.getElementById('saveChecklistTemplate').onclick=()=>saveChecklistTemplate(`${plan.title} checklist`,items.map(i=>i.text));
   }
-  if(state.planTab==='files'){
-    c.innerHTML=`<div class="section-head"><h2>${linkedFiles.length} file${linkedFiles.length===1?'':'s'}</h2><button id="planUploadFile">Add file</button></div>${linkedFiles.length?linkedFiles.map(f=>fileCardHtml(f,plan)).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>No files attached</strong><div>Store PDFs, screenshots, tickets and confirmations locally on this device.</div></div>'}`;
-    document.getElementById('planUploadFile').onclick=()=>openAttachmentPicker(id);
-    wireFileCards();
-  }
+  if(state.planTab==='files'){c.innerHTML=`<div class="section-head"><h2>${linkedFiles.length} file${linkedFiles.length===1?'':'s'}</h2><button id="planUploadFile">Add file</button></div>${linkedFiles.length?linkedFiles.map(f=>fileCardHtml(f,plan,[plan],tasks)).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>No files attached</strong><div>Add a new file or link one already in your Vault.</div></div>'}`;document.getElementById('planUploadFile').onclick=()=>openAttachmentPicker(id);wireFileCards(c);}
 }
 
 function nextUpHtml(item,files=[]){
-  const sourceId=item.sourceId||item.id;
-  const attached=files.filter(f=>f.itineraryItemId===sourceId);
-  const type=inferItineraryType(item);
-  const summary=itineraryMetaParts(item).slice(0,2).join(' · ');
+  const sourceId=item.sourceId||item.id;const attached=filesForSchedule(files,sourceId);const type=inferItineraryType(item);const summary=itineraryMetaParts(item).slice(0,2).join(' · ');
   return `<button type="button" class="next-up-card" data-next-schedule="${sourceId}"><div class="next-up-icon">${itineraryEmoji(type)}</div><div class="next-up-body"><div class="next-up-kicker">${[item.displayDate?formatDate(item.displayDate):'',item.displayTime||'Anytime'].filter(Boolean).join(' · ')}</div><div class="next-up-title">${escapeHtml(item.displayTitle||item.title)}</div>${summary?`<div class="next-up-details">${escapeHtml(summary)}</div>`:item.details?`<div class="next-up-details">${escapeHtml(item.details)}</div>`:''}${attached.length?`<div class="next-up-file">📎 ${attached.length} file${attached.length===1?'':'s'} attached</div>`:''}</div><div class="next-up-chevron">›</div></button>`;
 }
 
@@ -563,31 +506,15 @@ function timelineHtml(plan,itinerary,files){
 }
 
 function itineraryItemHtml(item,files){
-  const sourceId=item.sourceId||item.id;
-  const attached=files.filter(f=>f.itineraryItemId===sourceId);
-  const type=inferItineraryType(item);
-  const meta=itineraryMetaParts(item);
-  return `<article class="timeline-item" data-it-item="${sourceId}">
-    <div class="timeline-marker"><span>${itineraryEmoji(type)}</span></div>
-    <div class="timeline-content">
-      <div class="timeline-time">${escapeHtml(item.displayTime||item.time||(item.virtualMode==='stay'?'All day':'Anytime'))}</div>
-      <div class="card-title">${escapeHtml(item.displayTitle||item.title)}</div>
-      ${meta.length?`<div class="schedule-meta">${meta.map(x=>`<span>${escapeHtml(x)}</span>`).join('')}</div>`:''}
-      ${item.details?`<div class="card-subtitle">${escapeHtml(item.details)}</div>`:''}
-      ${attached.length?`<div class="schedule-files">${attached.map(f=>`<span class="schedule-file-wrap"><button class="schedule-file-chip" data-file-open="${f.id}">📎 ${escapeHtml(fileDisplayName(f))}</button><button class="schedule-file-rename" data-file-rename="${f.id}" aria-label="Rename ${escapeHtml(fileDisplayName(f))}">✎</button></span>`).join('')}</div>`:''}
-      <div class="schedule-actions"><button class="secondary-btn small-btn" data-it-edit="${sourceId}">Edit</button><button class="secondary-btn small-btn" data-it-add-file="${sourceId}">📎 Add file</button><button class="text-btn small-btn" data-it-delete="${sourceId}">Remove</button></div>
-    </div>
-  </article>`;
+  const sourceId=item.sourceId||item.id;const attached=filesForSchedule(files,sourceId);const type=inferItineraryType(item);const meta=itineraryMetaParts(item);
+  return `<article class="timeline-item" data-it-item="${sourceId}"><div class="timeline-marker"><span>${itineraryEmoji(type)}</span></div><div class="timeline-content"><div class="timeline-time">${escapeHtml(item.displayTime||item.time||(item.virtualMode==='stay'?'All day':'Anytime'))}</div><div class="schedule-title-row"><div class="card-title">${escapeHtml(item.displayTitle||item.title)}</div>${(!item.virtualMode||item.virtualMode==='hotel')&&item.bookingStatus?`<span class="booking-pill ${item.bookingStatus==='booked'?'booked':'planned'}">${scheduleStatusLabel(item)}</span>`:''}</div>${meta.length?`<div class="schedule-meta">${meta.map(x=>`<span>${escapeHtml(x)}</span>`).join('')}</div>`:''}${item.details?`<div class="card-subtitle schedule-note-preview">${escapeHtml(item.details)}</div>`:''}${attached.length?`<div class="schedule-files">${attached.map(f=>`<span class="schedule-file-wrap"><button class="schedule-file-chip" data-file-open="${f.id}">📎 ${escapeHtml(fileDisplayName(f))}</button><button class="schedule-file-rename" data-file-rename="${f.id}" aria-label="Rename ${escapeHtml(fileDisplayName(f))}">✎</button></span>`).join('')}</div>`:''}<div class="schedule-actions"><button class="secondary-btn small-btn" data-it-edit="${sourceId}">Edit</button><button class="secondary-btn small-btn" data-it-add-file="${sourceId}">📎 Add file</button><button class="text-btn small-btn" data-it-delete="${sourceId}">Remove</button></div></div></article>`;
 }
 
 function scheduleFieldsHtml(type,item,plan){
-  const min=plan.startDate?`min="${escapeHtml(plan.startDate)}"`:'';
-  const date=item.date||plan.startDate||'';
-  const endDate=item.endDate||'';
-  const arrivalDate=item.arrivalDate||'';
-  const commonDateTime=(dateLabel='Date',timeLabel='Time')=>`<div class="grid-2"><label>${dateLabel}<input name="date" type="date" ${min} value="${escapeHtml(date)}"></label><label>${timeLabel}<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div>`;
-  const journeyFields=(kind)=>`${commonDateTime('Travel date','Departure')}<div class="grid-2"><label>From<input name="from" maxlength="100" value="${escapeHtml(item.from||'')}" placeholder="${kind==='flight'?'Airport / city':'Station / place'}"></label><label>To<input name="to" maxlength="100" value="${escapeHtml(item.to||'')}" placeholder="${kind==='flight'?'Airport / city':'Station / place'}"></label></div><div class="grid-2"><label>Arrival date <small>(optional)</small><input name="arrivalDate" type="date" value="${escapeHtml(arrivalDate)}"></label><label>Arrival time<input name="arrivalTime" type="time" value="${escapeHtml(item.arrivalTime||'')}"></label></div>${kind==='flight'?`<label>Flight number<input name="flightNumber" maxlength="30" value="${escapeHtml(item.flightNumber||'')}" placeholder="e.g. BA123"></label>`:(kind==='train'||kind==='ferry')?`<label>Service / train number <small>(optional)</small><input name="serviceNumber" maxlength="40" value="${escapeHtml(item.serviceNumber||'')}"></label>`:''}<label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
-  if(type==='hotel')return `<div class="grid-2"><label>Check-in date<input name="date" type="date" ${min} value="${escapeHtml(date)}"></label><label>Check-in time<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div><div class="grid-2"><label>Check-out date<input name="endDate" type="date" ${date?`min="${escapeHtml(date)}"`:min} value="${escapeHtml(endDate)}"></label><label>Check-out time<input name="endTime" type="time" value="${escapeHtml(item.endTime||'')}"></label></div><label>Address<input name="address" maxlength="180" value="${escapeHtml(item.address||'')}" placeholder="Hotel address"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label><div class="field-hint">One hotel booking will appear on each relevant itinerary day: check-in, staying there, then check-out.</div>`;
+  const min=plan.startDate?`min="${escapeHtml(plan.startDate)}"`:'';const max=plan.endDate?`max="${escapeHtml(plan.endDate)}"`:'';const date=item.date||plan.startDate||'';const endDate=item.endDate||'';const arrivalDate=item.arrivalDate||'';
+  const commonDateTime=(dateLabel='Date',timeLabel='Time')=>`<div class="grid-2"><label>${dateLabel}<input name="date" type="date" ${min} ${max} value="${escapeHtml(date)}"></label><label>${timeLabel}<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div>`;
+  const journeyFields=kind=>`${commonDateTime('Travel date','Departure')}<div class="grid-2"><label>From<input name="from" maxlength="100" value="${escapeHtml(item.from||'')}" placeholder="${kind==='flight'?'Airport / city':'Station / place'}"></label><label>To<input name="to" maxlength="100" value="${escapeHtml(item.to||'')}" placeholder="${kind==='flight'?'Airport / city':'Station / place'}"></label></div><div class="grid-2"><label>Arrival date <small>(optional)</small><input name="arrivalDate" type="date" ${min} ${max} value="${escapeHtml(arrivalDate)}"></label><label>Arrival time<input name="arrivalTime" type="time" value="${escapeHtml(item.arrivalTime||'')}"></label></div>${kind==='flight'?`<label>Flight number<input name="flightNumber" maxlength="30" value="${escapeHtml(item.flightNumber||'')}" placeholder="e.g. BA123"></label>`:(kind==='train'||kind==='ferry')?`<label>Service / train number <small>(optional)</small><input name="serviceNumber" maxlength="40" value="${escapeHtml(item.serviceNumber||'')}"></label>`:''}<label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
+  if(type==='hotel')return `<div class="grid-2"><label>Check-in date<input name="date" type="date" ${min} ${max} value="${escapeHtml(date)}"></label><label>Check-in time<input name="time" type="time" value="${escapeHtml(item.time||'')}"></label></div><div class="grid-2"><label>Check-out date<input name="endDate" type="date" ${date?`min="${escapeHtml(date)}"`:min} ${max} value="${escapeHtml(endDate)}"></label><label>Check-out time<input name="endTime" type="time" value="${escapeHtml(item.endTime||'')}"></label></div><label>Address<input name="address" maxlength="180" value="${escapeHtml(item.address||'')}" placeholder="Hotel address"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label><div class="field-hint">One hotel booking appears across the stay: check-in, staying there, then check-out.</div>`;
   if(type==='flight'||type==='train'||type==='ferry')return journeyFields(type);
   if(type==='drive')return `${commonDateTime('Date','Departure / pickup')}<div class="grid-2"><label>From<input name="from" maxlength="100" value="${escapeHtml(item.from||'')}"></label><label>To<input name="to" maxlength="100" value="${escapeHtml(item.to||'')}"></label></div><label>Arrival time <small>(optional)</small><input name="arrivalTime" type="time" value="${escapeHtml(item.arrivalTime||'')}"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
   if(type==='food'||type==='activity')return `${commonDateTime('Date','Start time')}<label>${type==='food'?'Restaurant / venue':'Venue / location'}<input name="venue" maxlength="150" value="${escapeHtml(item.venue||'')}"></label><label>Booking reference <small>(optional)</small><input name="bookingRef" maxlength="80" value="${escapeHtml(item.bookingRef||'')}"></label>`;
@@ -595,57 +522,35 @@ function scheduleFieldsHtml(type,item,plan){
 }
 
 function openItineraryForm(plan,itemId=null){
-  const existing=itemId?(plan.itinerary||[]).find(x=>x.id===itemId):null;
-  let draft={...(existing||{id:'',date:plan.startDate||'',time:'',title:'',details:'',type:'other'})};
-  let selectedType=inferItineraryType(draft);
-  showModal(itemId?'Edit schedule item':'Add schedule item',`<form id="itForm" class="form-grid">
-    <label>Type<select id="itType" name="type">${itineraryTypeOptions.map(([value,label])=>`<option value="${value}" ${selectedType===value?'selected':''}>${itineraryEmoji(value)} ${label}</option>`).join('')}</select></label>
-    <label><span id="itTitleLabelText">${selectedType==='hotel'?'Hotel / accommodation name':'Title'}</span><input id="itTitleInput" name="title" required maxlength="100" value="${escapeHtml(draft.title||'')}" placeholder="${selectedType==='hotel'?'Hotel name':'Train to Newcastle'}"></label>
-    <div id="scheduleDynamicFields"></div>
-    <label>Notes <small>(optional)</small><textarea name="details" placeholder="Extra details, instructions or useful notes">${escapeHtml(draft.details||'')}</textarea></label>
-    <div class="form-actions"><button type="button" class="secondary-btn" id="cancelIt">Cancel</button><button class="primary-btn">${itemId?'Save changes':'Add'}</button></div>
-  </form>`);
-  const form=document.getElementById('itForm'); const dynamic=document.getElementById('scheduleDynamicFields'); const typeSelect=document.getElementById('itType');
+  const existing=itemId?(plan.itinerary||[]).find(x=>x.id===itemId):null;let draft={...(existing||{id:'',date:plan.startDate||'',time:'',title:'',details:'',type:'other',bookingStatus:'planned'})};let selectedType=inferItineraryType(draft);
+  showModal(itemId?'Edit schedule item':'Add schedule item',`<form id="itForm" class="form-grid"><label>Type<select id="itType" name="type">${itineraryTypeOptions.map(([value,label])=>`<option value="${value}" ${selectedType===value?'selected':''}>${itineraryEmoji(value)} ${label}</option>`).join('')}</select></label><label><span id="itTitleLabelText">${selectedType==='hotel'?'Hotel / accommodation name':'Title'}</span><input id="itTitleInput" name="title" required maxlength="100" value="${escapeHtml(draft.title||'')}" placeholder="${selectedType==='hotel'?'Hotel name':'Train to Newcastle'}"></label><label>Booking status<select name="bookingStatus"><option value="planned" ${draft.bookingStatus!=='booked'?'selected':''}>Planned / still to book</option><option value="booked" ${draft.bookingStatus==='booked'?'selected':''}>Booked / confirmed</option></select></label><div id="scheduleDynamicFields"></div><label>Notes <small>(optional)</small><textarea name="details" placeholder="Extra details, instructions or useful notes">${escapeHtml(draft.details||'')}</textarea></label><div class="form-actions"><button type="button" class="secondary-btn" id="cancelIt">Cancel</button><button class="primary-btn">${itemId?'Save changes':'Add'}</button></div></form>`);
+  const form=document.getElementById('itForm'),dynamic=document.getElementById('scheduleDynamicFields'),typeSelect=document.getElementById('itType');
   const collectDynamic=()=>{dynamic.querySelectorAll('[name]').forEach(el=>{draft[el.name]=el.value;});draft.title=form.elements.title.value;draft.details=form.elements.details.value;};
-  const renderDynamic=()=>{dynamic.innerHTML=scheduleFieldsHtml(typeSelect.value,draft,plan);const checkIn=dynamic.querySelector('[name="date"]');const checkOut=dynamic.querySelector('[name="endDate"]');if(checkIn&&checkOut){const sync=()=>{checkOut.min=checkIn.value||plan.startDate||'';if(checkIn.value&&checkOut.value&&checkOut.value<checkIn.value)checkOut.value=checkIn.value;};checkIn.onchange=sync;sync();}};
-  renderDynamic();
-  typeSelect.onchange=()=>{collectDynamic();selectedType=typeSelect.value;draft.type=selectedType;document.getElementById('itTitleLabelText').textContent=selectedType==='hotel'?'Hotel / accommodation name':'Title';document.getElementById('itTitleInput').placeholder=selectedType==='hotel'?'Hotel name':'Train to Newcastle';renderDynamic();};
-  document.getElementById('cancelIt').onclick=closeModal;
-  form.onsubmit=async e=>{
-    e.preventDefault();const f=new FormData(e.currentTarget);const type=f.get('type');
-    const date=f.get('date')||'',endDate=f.get('endDate')||'';
-    if(type==='hotel'&&date&&endDate&&endDate<date){alert('Hotel check-out cannot be before check-in.');return;}
-    const record={...draft,id:draft.id||uid('it'),type,title:f.get('title').trim(),details:f.get('details').trim(),date,time:f.get('time')||'',endDate,endTime:f.get('endTime')||'',from:f.get('from')||'',to:f.get('to')||'',arrivalDate:f.get('arrivalDate')||'',arrivalTime:f.get('arrivalTime')||'',bookingRef:(f.get('bookingRef')||'').trim(),flightNumber:(f.get('flightNumber')||'').trim(),serviceNumber:(f.get('serviceNumber')||'').trim(),address:(f.get('address')||'').trim(),venue:(f.get('venue')||'').trim()};
-    if(existing) plan.itinerary=(plan.itinerary||[]).map(x=>x.id===existing.id?record:x); else plan.itinerary=[...(plan.itinerary||[]),record];
-    plan.updatedAt=nowIso();await LifeDB.put('plans',plan);closeModal();render();
+  const renderDynamic=()=>{dynamic.innerHTML=scheduleFieldsHtml(typeSelect.value,draft,plan);const dateInput=dynamic.querySelector('[name="date"]'),endInput=dynamic.querySelector('[name="endDate"]'),arrivalInput=dynamic.querySelector('[name="arrivalDate"]');const sync=()=>{if(endInput){endInput.min=dateInput?.value||plan.startDate||'';if(dateInput?.value&&endInput.value&&endInput.value<dateInput.value)endInput.value=dateInput.value;}if(arrivalInput)arrivalInput.min=dateInput?.value||plan.startDate||'';};if(dateInput)dateInput.onchange=sync;sync();};
+  renderDynamic();typeSelect.onchange=()=>{collectDynamic();selectedType=typeSelect.value;draft.type=selectedType;document.getElementById('itTitleLabelText').textContent=selectedType==='hotel'?'Hotel / accommodation name':'Title';document.getElementById('itTitleInput').placeholder=selectedType==='hotel'?'Hotel name':'Train to Newcastle';renderDynamic();};document.getElementById('cancelIt').onclick=closeModal;
+  form.onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget),type=f.get('type'),date=f.get('date')||'',endDate=f.get('endDate')||'',arrivalDate=f.get('arrivalDate')||'',time=f.get('time')||'',arrivalTime=f.get('arrivalTime')||'';
+    if(plan.startDate&&date&&date<plan.startDate){alert('This schedule item is before the trip start date.');return;}if(plan.endDate&&date&&date>plan.endDate){alert('This schedule item is after the trip end date.');return;}if(type==='hotel'&&date&&endDate&&endDate<date){alert('Hotel check-out cannot be before check-in.');return;}if(plan.endDate&&endDate&&endDate>plan.endDate){alert('Hotel check-out is after the trip end date.');return;}if(arrivalDate&&date&&arrivalDate<date){alert('Arrival cannot be before departure.');return;}if(plan.endDate&&arrivalDate&&arrivalDate>plan.endDate){alert('Arrival is after the trip end date.');return;}if(arrivalDate&&date&&arrivalDate===date&&time&&arrivalTime&&arrivalTime<time){alert('Arrival time cannot be before departure time on the same date.');return;}
+    const record={...draft,id:draft.id||uid('it'),type,title:f.get('title').trim(),details:f.get('details').trim(),bookingStatus:f.get('bookingStatus')||'planned',date,time,endDate,endTime:f.get('endTime')||'',from:f.get('from')||'',to:f.get('to')||'',arrivalDate,arrivalTime,bookingRef:(f.get('bookingRef')||'').trim(),flightNumber:(f.get('flightNumber')||'').trim(),serviceNumber:(f.get('serviceNumber')||'').trim(),address:(f.get('address')||'').trim(),venue:(f.get('venue')||'').trim()};if(existing)plan.itinerary=(plan.itinerary||[]).map(x=>x.id===existing.id?record:x);else plan.itinerary=[...(plan.itinerary||[]),record];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);closeModal();render();
   };
 }
 
-function fileCardHtml(file,plan=null){
+function compactFileHtml(file){
   const icon=file.type?.includes('pdf')?'PDF':file.type?.startsWith('image/')?'IMG':'FILE';
-  const itineraryItem=plan && file.itineraryItemId ? (plan.itinerary||[]).find(x=>x.id===file.itineraryItemId) : null;
-  const displayName=fileDisplayName(file);
-  const original=originalFileName(file);
-  return `<div class="card" data-file-card="${file.id}"><div class="file-row"><div class="file-icon">${icon}</div><div><div class="card-title">${escapeHtml(displayName)}</div><div class="card-subtitle">${formatBytes(file.size)} · stored locally${displayName!==original?` · Original: ${escapeHtml(original)}`:''}</div>${itineraryItem?`<div class="meta"><span class="pill plan">${itineraryEmoji(inferItineraryType(itineraryItem))} ${escapeHtml(itineraryItem.title)}</span></div>`:''}</div></div><div class="card-actions"><button class="secondary-btn small-btn" data-file-open="${file.id}">Open</button><button class="secondary-btn small-btn" data-file-rename="${file.id}">Rename</button><button class="secondary-btn small-btn" data-file-download="${file.id}">Save copy</button><button class="text-btn small-btn" data-file-delete="${file.id}">Delete</button></div></div>`;
+  return `<button class="home-file-row" data-file-open="${file.id}"><div class="file-preview">${isImageFile(file)?`<img data-file-thumb="${file.id}" alt="">`:`<div class="file-icon">${icon}</div>`}</div><div><strong>${escapeHtml(fileDisplayName(file))}</strong><small>${file.pinned?'★ Pinned · ':''}${formatBytes(file.size)}</small></div><span>›</span></button>`;
+}
+
+function fileCardHtml(file,plan=null,allPlans=[],allTasks=[]){
+  const icon=file.type?.includes('pdf')?'PDF':file.type?.startsWith('image/')?'IMG':'FILE';const displayName=fileDisplayName(file),original=originalFileName(file);const plans=allPlans.length?allPlans:(plan?[plan]:[]);const planLinks=plans.filter(p=>filePlanIds(file).includes(p.id)||fileItineraryIds(file).some(id=>(p.itinerary||[]).some(i=>i.id===id)));const taskLinks=allTasks.filter(t=>fileTaskIds(file).includes(t.id));
+  return `<div class="card file-card ${file.pinned?'pinned':''}" data-file-card="${file.id}"><div class="file-row"><div class="file-preview">${isImageFile(file)?`<img data-file-thumb="${file.id}" alt="">`:`<div class="file-icon">${icon}</div>`}</div><div><div class="file-title-line"><div class="card-title">${escapeHtml(displayName)}</div>${file.pinned?'<span class="pin-mark">★</span>':''}</div><div class="card-subtitle">${formatBytes(file.size)} · stored locally${displayName!==original?` · Original: ${escapeHtml(original)}`:''}</div>${planLinks.length||taskLinks.length?`<div class="meta">${planLinks.slice(0,3).map(p=>`<span class="pill plan">✈ ${escapeHtml(p.title)}</span>`).join('')}${taskLinks.slice(0,2).map(t=>`<span class="pill">✓ ${escapeHtml(t.title)}</span>`).join('')}</div>`:''}</div></div><div class="card-actions"><button class="secondary-btn small-btn" data-file-open="${file.id}">Open</button><button class="secondary-btn small-btn" data-file-link="${file.id}">Link</button><button class="secondary-btn small-btn" data-file-pin="${file.id}">${file.pinned?'Unpin':'Pin'}</button><button class="secondary-btn small-btn" data-file-rename="${file.id}">Rename</button><button class="secondary-btn small-btn" data-file-download="${file.id}">Save copy</button><button class="text-btn small-btn" data-file-delete="${file.id}">Delete</button></div></div>`;
 }
 
 async function renderVault(){
-  setTitle('Vault');
-  const [files,plans]=await Promise.all([LifeDB.getAll('files'),LifeDB.getAll('plans')]);
-  files.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  app.innerHTML=`<div class="notice">Files in the Vault are stored in this browser’s IndexedDB on this device. They are not uploaded into the GitHub repository.</div><section class="section"><div class="section-head"><h2>${files.length} stored file${files.length===1?'':'s'}</h2><button id="vaultUpload">Add file</button></div>${files.length?files.map(f=>{const p=plans.find(p=>p.id===f.planId);const html=fileCardHtml(f,p);return html.replace('</div></div><div class="card-actions">',`${p?`<div class="meta"><span class="pill plan">✈ ${escapeHtml(p.title)}</span></div>`:''}</div></div><div class="card-actions">`)}).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>Vault is empty</strong><div>Add a PDF, screenshot, ticket or other useful file.</div></div>'}</section>`;
-  document.getElementById('vaultUpload').onclick=()=>openAttachmentPicker();
-  wireFileCards();
+  setTitle('Vault');const [files,plans,tasks]=await Promise.all([LifeDB.getAll('files'),LifeDB.getAll('plans'),LifeDB.getAll('tasks')]);files.sort((a,b)=>(b.pinned===true)-(a.pinned===true)||(b.createdAt||'').localeCompare(a.createdAt||''));
+  app.innerHTML=`<div class="notice">Files stay in this device’s IndexedDB. V2 lets one file link to several plans, schedule items and tasks without creating duplicate copies.</div><section class="section"><div class="section-head"><h2>${files.length} stored file${files.length===1?'':'s'}</h2><button id="vaultUpload">Add file</button></div>${files.length?files.map(f=>fileCardHtml(f,null,plans,tasks)).join(''):'<div class="empty"><span class="empty-icon">▣</span><strong>Vault is empty</strong><div>Add a PDF, screenshot, ticket or other useful file.</div></div>'}</section>`;document.getElementById('vaultUpload').onclick=()=>openAttachmentPicker();wireFileCards();
 }
 
 async function storeFiles(fileList,planId='',itineraryItemId='',displayNames=[]){
-  const files=Array.from(fileList||[]);
-  if(!files.length)return;
-  for(let i=0;i<files.length;i++){
-    const file=files[i];const friendly=String(displayNames[i]||'').trim();
-    await LifeDB.put('files',{id:uid('file'),name:file.name,originalName:file.name,displayName:friendly&&friendly!==file.name?friendly:'',type:file.type||'application/octet-stream',size:file.size,blob:file,planId,itineraryItemId,category:'',createdAt:nowIso(),updatedAt:nowIso()});
-  }
-  toast(`${files.length} file${files.length===1?'':'s'} stored locally`);render();
+  const files=Array.from(fileList||[]);if(!files.length)return;for(let i=0;i<files.length;i++){const file=files[i],friendly=String(displayNames[i]||'').trim();await LifeDB.put('files',{id:uid('file'),name:file.name,originalName:file.name,displayName:friendly&&friendly!==file.name?friendly:'',type:file.type||'application/octet-stream',size:file.size,blob:file,planId,itineraryItemId,planIds:planId?[planId]:[],itineraryItemIds:itineraryItemId?[itineraryItemId]:[],taskIds:[],pinned:false,category:'',createdAt:nowIso(),updatedAt:nowIso()});}toast(`${files.length} file${files.length===1?'':'s'} stored locally`);render();
 }
 
 function openFileNamingForm(fileList,planId='',itineraryItemId=''){
@@ -656,11 +561,18 @@ function openFileNamingForm(fileList,planId='',itineraryItemId=''){
   form.onsubmit=async e=>{e.preventDefault();const f=new FormData(form);const names=files.map((_,i)=>f.get(`fileName${i}`));closeModal();await storeFiles(files,planId,itineraryItemId,names);};
 }
 
+async function openExistingFilePicker(planId='',itineraryItemId='',taskId=''){
+  const files=(await LifeDB.getAll('files')).sort((a,b)=>(b.pinned===true)-(a.pinned===true)||(b.createdAt||'').localeCompare(a.createdAt||''));
+  showModal('Link existing file',files.length?`<div class="existing-file-list">${files.map(f=>`<button class="existing-file-choice" data-existing-file="${f.id}"><span>${f.pinned?'★':isImageFile(f)?'🖼️':f.type?.includes('pdf')?'📄':'▣'}</span><div><strong>${escapeHtml(fileDisplayName(f))}</strong><small>${formatBytes(f.size)}</small></div><b>Link</b></button>`).join('')}</div>`:`<div class="empty"><strong>Vault is empty</strong><div>Upload or share a file into Life Dashboard first.</div></div>`);
+  modalRoot.querySelectorAll('[data-existing-file]').forEach(btn=>btn.onclick=async()=>{const file=await LifeDB.get('files',btn.dataset.existingFile);if(!file)return;file.planIds=uniq([...filePlanIds(file),planId]);file.itineraryItemIds=uniq([...fileItineraryIds(file),itineraryItemId]);file.taskIds=uniq([...fileTaskIds(file),taskId]);if(planId&&!file.planId)file.planId=planId;if(itineraryItemId&&!file.itineraryItemId)file.itineraryItemId=itineraryItemId;file.updatedAt=nowIso();await LifeDB.put('files',file);closeModal();toast('Existing file linked');render();});
+}
+
 function openAttachmentPicker(planId='',itineraryItemId=''){
   showModal('Add attachment',`<div class="quick-grid attachment-picker-grid">
     <button class="quick-option" id="attachmentCameraButton"><span>📷</span><strong>Take photo</strong><small>Open the camera for a new photo</small></button>
     <button class="quick-option" id="attachmentGalleryButton"><span>🖼️</span><strong>Photos & images</strong><small>Ask Android for photos or screenshots</small></button>
     <button class="quick-option" id="attachmentFilesButton"><span>📁</span><strong>Browse files</strong><small>PDFs, email files and text documents</small></button>
+    ${planId||itineraryItemId?`<button class="quick-option" id="attachmentExistingButton"><span>🔗</span><strong>Link existing</strong><small>Use a file already stored in your Vault</small></button>`:''}
   </div>
   <div class="share-tip"><strong>Faster from Samsung Gallery</strong><span>If Life Dashboard appears in Android’s Share sheet, you can select a photo in Gallery → Share → Life Dashboard. Shared files land in the Vault and can then be renamed or linked.</span></div>
   <input id="attachmentCameraInput" type="file" hidden accept="image/*" capture="environment">
@@ -675,6 +587,18 @@ function openAttachmentPicker(planId='',itineraryItemId=''){
   bindPicker('attachmentCameraButton','attachmentCameraInput');
   bindPicker('attachmentGalleryButton','attachmentGalleryInput');
   bindPicker('attachmentFilesButton','attachmentFilesInput');
+  const existingButton=document.getElementById('attachmentExistingButton');if(existingButton)existingButton.onclick=()=>openExistingFilePicker(planId,itineraryItemId);
+}
+
+async function openFileLinkManager(fileId){
+  const [file,plans,tasks]=await Promise.all([LifeDB.get('files',fileId),LifeDB.getAll('plans'),LifeDB.getAll('tasks')]);if(!file)return;
+  const existingPlanIds=filePlanIds(file),existingItIds=fileItineraryIds(file),existingTaskIds=fileTaskIds(file);
+  const linkSummary=()=>{const rows=[];for(const id of existingPlanIds){const p=plans.find(x=>x.id===id);if(p)rows.push(`<div class="link-row"><span>✈ ${escapeHtml(p.title)}</span><button type="button" data-unlink-type="plan" data-unlink-id="${id}">×</button></div>`);}for(const p of plans){for(const it of p.itinerary||[]){if(existingItIds.includes(it.id))rows.push(`<div class="link-row"><span>${itineraryEmoji(inferItineraryType(it))} ${escapeHtml(it.title)} <small>· ${escapeHtml(p.title)}</small></span><button type="button" data-unlink-type="itinerary" data-unlink-id="${it.id}">×</button></div>`);}}for(const id of existingTaskIds){const t=tasks.find(x=>x.id===id);if(t)rows.push(`<div class="link-row"><span>✓ ${escapeHtml(t.title)}</span><button type="button" data-unlink-type="task" data-unlink-id="${id}">×</button></div>`);}return rows.join('')||'<div class="field-hint">No links yet. The file is only in the global Vault.</div>';};
+  showModal('Link file',`<div class="file-link-head"><strong>${escapeHtml(fileDisplayName(file))}</strong><small>One stored file can appear in several useful places.</small></div><div id="existingFileLinks" class="link-list">${linkSummary()}</div><form id="fileLinkForm" class="form-grid"><label>Plan<select id="fileLinkPlan"><option value="">No plan</option>${plans.map(p=>`<option value="${p.id}">${escapeHtml(p.title)}</option>`).join('')}</select></label><label>Schedule item<select id="fileLinkSchedule"><option value="">None</option></select></label><label>Task<select id="fileLinkTask"><option value="">None</option>${tasks.filter(t=>t.status!=='done').map(t=>`<option value="${t.id}">${escapeHtml(t.title)}</option>`).join('')}</select></label><div class="form-actions"><button type="button" class="secondary-btn" id="closeFileLinks">Done</button><button class="primary-btn">Add link</button></div></form>`);
+  const planSelect=document.getElementById('fileLinkPlan'),scheduleSelect=document.getElementById('fileLinkSchedule'),taskSelect=document.getElementById('fileLinkTask');const refreshSchedule=()=>{const p=plans.find(x=>x.id===planSelect.value);scheduleSelect.innerHTML='<option value="">None</option>'+((p?.itinerary||[]).map(i=>`<option value="${i.id}">${itineraryEmoji(inferItineraryType(i))} ${escapeHtml(i.title)}</option>`).join(''));};planSelect.onchange=refreshSchedule;refreshSchedule();document.getElementById('closeFileLinks').onclick=closeModal;
+  const saveFile=async()=>{file.planIds=uniq(existingPlanIds);file.itineraryItemIds=uniq(existingItIds);file.taskIds=uniq(existingTaskIds);file.planId=file.planIds[0]||'';file.itineraryItemId=file.itineraryItemIds[0]||'';file.updatedAt=nowIso();await LifeDB.put('files',file);};
+  document.getElementById('fileLinkForm').onsubmit=async e=>{e.preventDefault();const pId=planSelect.value,itId=scheduleSelect.value,tId=taskSelect.value;if(!pId&&!itId&&!tId){toast('Choose something to link');return;}if(pId&&!existingPlanIds.includes(pId))existingPlanIds.push(pId);if(itId&&!existingItIds.includes(itId))existingItIds.push(itId);if(tId&&!existingTaskIds.includes(tId))existingTaskIds.push(tId);const linkedTask=tasks.find(t=>t.id===tId);if(linkedTask?.planId&&!existingPlanIds.includes(linkedTask.planId))existingPlanIds.push(linkedTask.planId);if(itId){const parent=plans.find(p=>(p.itinerary||[]).some(i=>i.id===itId));if(parent&&!existingPlanIds.includes(parent.id))existingPlanIds.push(parent.id);}await saveFile();closeModal();toast('File linked');render();};
+  document.getElementById('existingFileLinks').querySelectorAll('[data-unlink-type]').forEach(btn=>btn.onclick=async()=>{const id=btn.dataset.unlinkId,type=btn.dataset.unlinkType;if(type==='plan'){const i=existingPlanIds.indexOf(id);if(i>=0)existingPlanIds.splice(i,1);}if(type==='itinerary'){const i=existingItIds.indexOf(id);if(i>=0)existingItIds.splice(i,1);}if(type==='task'){const i=existingTaskIds.indexOf(id);if(i>=0)existingTaskIds.splice(i,1);}await saveFile();closeModal();toast('Link removed');render();});
 }
 
 async function openRenameFile(fileId){
@@ -685,7 +609,10 @@ async function openRenameFile(fileId){
 }
 
 function wireFileCards(root=app){
+  root.querySelectorAll('[data-file-thumb]').forEach(async img=>{const f=await LifeDB.get('files',img.dataset.fileThumb);if(!f?.blob)return;const url=URL.createObjectURL(f.blob);img.onload=()=>URL.revokeObjectURL(url);img.src=url;});
   root.querySelectorAll('[data-file-open]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.fileOpen);if(!f)return;const url=URL.createObjectURL(f.blob);const w=window.open(url,'_blank');if(!w){const a=document.createElement('a');a.href=url;a.target='_blank';a.click();}setTimeout(()=>URL.revokeObjectURL(url),60000);});
+  root.querySelectorAll('[data-file-link]').forEach(btn=>btn.onclick=()=>openFileLinkManager(btn.dataset.fileLink));
+  root.querySelectorAll('[data-file-pin]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.filePin);if(!f)return;f.pinned=!f.pinned;f.updatedAt=nowIso();await LifeDB.put('files',f);toast(f.pinned?'File pinned':'File unpinned');render();});
   root.querySelectorAll('[data-file-rename]').forEach(btn=>btn.onclick=()=>openRenameFile(btn.dataset.fileRename));
   root.querySelectorAll('[data-file-download]').forEach(btn=>btn.onclick=async()=>{const f=await LifeDB.get('files',btn.dataset.fileDownload);if(!f)return;const url=URL.createObjectURL(f.blob);const a=document.createElement('a');a.href=url;a.download=downloadFileName(f);a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);});
   root.querySelectorAll('[data-file-delete]').forEach(btn=>btn.onclick=async()=>{if(confirm('Delete this locally stored file?')){await LifeDB.remove('files',btn.dataset.fileDelete);render();}});
@@ -720,24 +647,42 @@ async function openPlanChecklistItem(planId){
   document.getElementById('planFabChecklist').onsubmit=async e=>{e.preventDefault();const text=new FormData(e.currentTarget).get('text').trim();plan.checklist=[...(plan.checklist||[]),{id:uid('check'),text,checked:false}];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);closeModal();render();};
 }
 
+async function saveChecklistTemplate(defaultName,items){
+  const clean=(items||[]).map(x=>String(x||'').trim()).filter(Boolean);if(!clean.length){toast('Add at least one checklist item first');return;}
+  showModal('Save checklist template',`<form id="templateSaveForm" class="form-grid"><label>Template name<input name="name" required maxlength="80" value="${escapeHtml(defaultName||'Checklist')}"></label><div class="field-hint">${clean.length} item${clean.length===1?'':'s'} will be saved as a reusable local template.</div><div class="form-actions"><button type="button" class="secondary-btn" id="cancelTemplateSave">Cancel</button><button class="primary-btn">Save template</button></div></form>`);document.getElementById('cancelTemplateSave').onclick=closeModal;document.getElementById('templateSaveForm').onsubmit=async e=>{e.preventDefault();const name=new FormData(e.currentTarget).get('name').trim();await LifeDB.put('templates',{id:uid('template'),type:'checklist',name,items:clean,createdAt:nowIso(),updatedAt:nowIso()});closeModal();toast('Template saved');};
+}
+async function openChecklistTemplatePicker(plan){
+  const templates=(await LifeDB.getAll('templates')).filter(t=>t.type==='checklist').sort((a,b)=>a.name.localeCompare(b.name));
+  showModal('Use checklist template',templates.length?`<div class="template-list">${templates.map(t=>`<button class="template-choice" data-template-use="${t.id}"><div><strong>${escapeHtml(t.name)}</strong><small>${(t.items||[]).length} items</small></div><span>›</span></button>`).join('')}</div>`:`<div class="empty"><strong>No templates yet</strong><div>Save any list or trip checklist as a template first.</div></div>`);
+  modalRoot.querySelectorAll('[data-template-use]').forEach(btn=>btn.onclick=async()=>{const t=templates.find(x=>x.id===btn.dataset.templateUse);if(!t)return;const existing=new Set((plan.checklist||[]).map(i=>i.text.toLowerCase()));const additions=(t.items||[]).filter(text=>!existing.has(text.toLowerCase())).map(text=>({id:uid('check'),text,checked:false}));plan.checklist=[...(plan.checklist||[]),...additions];plan.updatedAt=nowIso();await LifeDB.put('plans',plan);closeModal();toast(`${additions.length} checklist item${additions.length===1?'':'s'} added`);render();});
+}
+
+async function openTemplateManager(){
+  const templates=(await LifeDB.getAll('templates')).filter(t=>t.type==='checklist').sort((a,b)=>a.name.localeCompare(b.name));
+  showModal('Checklist templates',templates.length?`<div class="template-list">${templates.map(t=>`<div class="template-manage-row"><div><strong>${escapeHtml(t.name)}</strong><small>${(t.items||[]).length} items</small></div><button class="text-btn" data-template-delete="${t.id}">Delete</button></div>`).join('')}</div>`:`<div class="empty"><strong>No templates saved</strong><div>Save a list or trip checklist as a template.</div></div>`);
+  modalRoot.querySelectorAll('[data-template-delete]').forEach(btn=>btn.onclick=async()=>{if(confirm('Delete this checklist template?')){await LifeDB.remove('templates',btn.dataset.templateDelete);closeModal();toast('Template deleted');renderSettings();}});
+}
+
 async function renderSettings(){
   setTitle('Settings');
   let usage='Unavailable', quota='';
   if(navigator.storage?.estimate){const est=await navigator.storage.estimate();usage=formatBytes(est.usage||0);quota=formatBytes(est.quota||0);}
   const persisted=navigator.storage?.persisted ? await navigator.storage.persisted() : false;
-  const backupMeta=await LifeDB.get('settings','backupMeta');
+  const [backupMeta,templates]=await Promise.all([LifeDB.get('settings','backupMeta'),LifeDB.getAll('templates')]);
   app.innerHTML=`<div class="back-row"><button id="backSettings">‹ Home</button></div>
     <section class="section"><div class="card">
       <div class="settings-row"><h3>App version</h3><p>Running <strong>v${APP_VERSION}</strong> · ${RELEASE_NAME}. Use this to confirm exactly which release Samsung Internet has loaded.</p><button id="checkVersion" class="secondary-btn">Check deployed version</button> <button id="reloadLatest" class="secondary-btn">Reload latest</button></div>
       <div class="settings-row"><h3>Local storage</h3><p>Browser storage currently uses about <strong>${usage}</strong>${quota?` of ${quota} available`:''}. Persistent storage requested: <strong>${persisted?'Yes':'No'}</strong>.</p><button id="requestPersist" class="secondary-btn">Protect local storage</button></div>
-      <div class="settings-row"><h3>Encrypted backup</h3><p><strong>${escapeHtml(relativeBackupText(backupMeta?.lastBackupAt))}</strong>. Export tasks, lists, plans, Inbox items and attachments into one encrypted <code>.lifedash</code> file. Keep the password safe: it is not recoverable.</p><button id="exportBackup" class="primary-btn">Export everything</button> <button id="importBackup" class="secondary-btn">Restore backup</button><input type="file" id="backupInput" hidden accept=".lifedash,application/octet-stream"></div>
+      <div class="settings-row"><h3>Encrypted backup</h3><p><strong>${escapeHtml(relativeBackupText(backupMeta?.lastBackupAt))}</strong>. Export tasks, lists, plans, templates, Inbox items and attachments into one encrypted <code>.lifedash</code> file. Keep the password safe: it is not recoverable.</p><button id="exportBackup" class="primary-btn">Export everything</button> <button id="importBackup" class="secondary-btn">Restore backup</button><input type="file" id="backupInput" hidden accept=".lifedash,application/octet-stream"></div>
       <div class="settings-row"><h3>Cache controls</h3><p>Clearing the app cache does <strong>not</strong> delete your IndexedDB data or attachments. It only forces the app code to be downloaded again.</p><button id="clearCache" class="secondary-btn">Clear app cache</button></div>
-      <div class="settings-row"><h3>Privacy</h3><p>Your personal content is stored locally in this browser profile. Someone opening the public GitHub Pages URL on another device gets a fresh empty dashboard. Clearing site data, uninstalling browser data, or changing phones without a backup can remove local content.</p></div>
+      <div class="settings-row"><h3>Checklist templates</h3><p><strong>${templates.length}</strong> reusable template${templates.length===1?'':'s'} stored locally.</p><button id="manageTemplates" class="secondary-btn">Manage templates</button></div>
+      <div class="settings-row"><h3>Data model</h3><p>Database schema <strong>v${LifeDB.DB_VERSION}</strong>. V2 adds a templates store and connected file-link metadata while migrating your existing V1 data in place.</p></div><div class="settings-row"><h3>Privacy</h3><p>Your personal content is stored locally in this browser profile. Someone opening the public GitHub Pages URL on another device gets a fresh empty dashboard. Clearing site data, uninstalling browser data, or changing phones without a backup can remove local content.</p></div>
     </div></section>`;
   document.getElementById('backSettings').onclick=()=>setView('home');
   document.getElementById('checkVersion').onclick=checkDeployedVersion;
   document.getElementById('reloadLatest').onclick=reloadLatest;
   document.getElementById('requestPersist').onclick=async()=>{if(!navigator.storage?.persist){toast('Persistent storage is not supported by this browser');return;}const ok=await navigator.storage.persist();toast(ok?'Persistent storage granted':'Browser did not grant persistent storage');renderSettings();};
+  document.getElementById('manageTemplates').onclick=openTemplateManager;
   document.getElementById('clearCache').onclick=async()=>{if(confirm('Clear only the app cache and reload? Your Life Dashboard data will stay in IndexedDB.')){const keys=await caches.keys();await Promise.all(keys.filter(k=>k.startsWith('life-dashboard-')).map(k=>caches.delete(k)));location.reload();}};
   document.getElementById('exportBackup').onclick=exportEncryptedBackup;
   document.getElementById('importBackup').onclick=()=>document.getElementById('backupInput').click();
@@ -826,13 +771,31 @@ function openQuickAdd(){
   });
 }
 
+async function openGlobalSearch(){
+  showModal('Search Life Dashboard',`<div class="search-box"><span>⌕</span><input id="globalSearchInput" type="search" autocomplete="off" placeholder="Search tasks, trips, schedule, files, lists…" value="${escapeHtml(state.searchQuery||'')}"></div><div id="globalSearchResults" class="search-results"><div class="empty"><strong>Search everything stored locally</strong><div>Try a place, booking name, task, note or filename.</div></div></div>`);
+  const input=document.getElementById('globalSearchInput'),results=document.getElementById('globalSearchResults');
+  const run=async()=>{const q=input.value.trim().toLowerCase();state.searchQuery=input.value;if(q.length<2){results.innerHTML='<div class="empty"><strong>Type at least 2 characters</strong></div>';return;}const [tasks,plans,lists,files,inbox,templates]=await Promise.all(['tasks','plans','lists','files','inbox','templates'].map(LifeDB.getAll));const hits=[];const match=(...parts)=>parts.filter(Boolean).join(' ').toLowerCase().includes(q);
+    for(const t of tasks)if(match(t.title,t.notes,t.category))hits.push({type:'task',id:t.id,title:t.title,sub:'Task',icon:'✓'});
+    for(const p of plans){if(match(p.title,p.location,p.notes))hits.push({type:'plan',id:p.id,title:p.title,sub:`${planEmoji(p.type)} Plan`,icon:planEmoji(p.type)});for(const it of p.itinerary||[])if(match(it.title,it.details,it.from,it.to,it.venue,it.address,it.bookingRef))hits.push({type:'schedule',id:it.id,planId:p.id,title:it.title,sub:`Schedule · ${p.title}`,icon:itineraryEmoji(inferItineraryType(it))});}
+    for(const l of lists)if(match(l.name,...(l.items||[]).map(i=>i.text)))hits.push({type:'list',id:l.id,title:l.name,sub:'List',icon:l.type==='shopping'?'🛒':'☑'});
+    for(const f of files)if(match(fileDisplayName(f),originalFileName(f),f.category))hits.push({type:'file',id:f.id,title:fileDisplayName(f),sub:'Vault file',icon:f.pinned?'★':'▣'});
+    for(const i of inbox)if(match(i.text))hits.push({type:'inbox',id:i.id,title:i.text,sub:'Inbox',icon:'📥'});
+    for(const t of templates)if(match(t.name,...(t.items||[])))hits.push({type:'template',id:t.id,title:t.name,sub:'Checklist template',icon:'♻'});
+    results.innerHTML=hits.length?hits.slice(0,40).map((h,i)=>`<button class="search-result" data-search-index="${i}"><span>${h.icon}</span><div><strong>${escapeHtml(h.title)}</strong><small>${escapeHtml(h.sub)}</small></div><b>›</b></button>`).join(''):`<div class="empty"><strong>No matches</strong><div>Nothing in Life Dashboard contains “${escapeHtml(input.value.trim())}”.</div></div>`;
+    results.querySelectorAll('[data-search-index]').forEach(btn=>btn.onclick=async()=>{const h=hits[Number(btn.dataset.searchIndex)];closeModal();if(h.type==='task')return openTaskForm(h.id);if(h.type==='plan'){state.selectedPlanId=h.id;state.planTab='overview';return render();}if(h.type==='schedule'){state.selectedPlanId=h.planId;state.planTab='itinerary';state.highlightItineraryItemId=h.id;return render();}if(h.type==='list'){state.selectedListId=h.id;return render();}if(h.type==='file'){const f=await LifeDB.get('files',h.id);if(f){const url=URL.createObjectURL(f.blob);window.open(url,'_blank');setTimeout(()=>URL.revokeObjectURL(url),60000);}return;}if(h.type==='inbox'){state.view='inbox';return render();}if(h.type==='template'){state.view='lists';return render();}});
+  };
+  input.oninput=()=>{clearTimeout(input._timer);input._timer=setTimeout(run,120);};requestAnimationFrame(()=>{input.focus();if(input.value)run();});
+}
+
 document.querySelectorAll('.nav-item').forEach(btn=>btn.onclick=()=>setView(btn.dataset.view));
 document.getElementById('quickAddButton').onclick=openQuickAdd;
+document.getElementById('searchButton').onclick=openGlobalSearch;
 document.getElementById('inboxButton').onclick=()=>{state.view='inbox';state.selectedListId=null;state.selectedPlanId=null;document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));render();};
 document.getElementById('settingsButton').onclick=()=>{state.view='settings';state.selectedListId=null;state.selectedPlanId=null;document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));render();};
 
 async function init(){
   await LifeDB.open();
+  const schemaMeta=await LifeDB.get('settings','schemaMeta');if(!schemaMeta||schemaMeta.version!==LifeDB.DB_VERSION)await LifeDB.put('settings',{id:'schemaMeta',version:LifeDB.DB_VERSION,migratedAt:nowIso(),appVersion:APP_VERSION});
   const params=new URLSearchParams(location.search);const shared=params.get('shared');if(shared){history.replaceState({},'',location.pathname+location.hash);}
   render();
   if(shared)setTimeout(()=>toast(shared==='files'?'Shared file added to Vault':'Shared item added to Life Dashboard'),500);
